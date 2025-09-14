@@ -9,6 +9,7 @@ license = {text = "GNU LESSER GENERAL PUBLIC LICENSE                       Versi
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "httpx (>=0.28.1,<0.29.0)"
 ]
 
 
