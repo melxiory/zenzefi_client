@@ -1,0 +1,127 @@
+# certificate_manager.py
+import ssl
+import logging
+from pathlib import Path
+from datetime import datetime, timedelta
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+import ipaddress  # Добавляем импорт
+
+logger = logging.getLogger(__name__)
+
+
+class CertificateManager:
+    def __init__(self, nginx_dir: Path):
+        self.nginx_dir = nginx_dir
+        self.cert_path = nginx_dir / "fake.crt"
+        self.key_path = nginx_dir / "fake.key"
+
+    def generate_self_signed_certificate(self) -> bool:
+        """Генерирует самоподписанный сертификат для localhost"""
+        try:
+            # Генерируем приватный ключ
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+            )
+
+            # Создаем информацию о субъекте (владельце сертификата)
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "RU"),
+                x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Moscow"),
+                x509.NameAttribute(NameOID.LOCALITY_NAME, "Moscow"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Zenzefi"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
+            ])
+
+            # Создаем сертификат
+            cert_builder = x509.CertificateBuilder().subject_name(
+                subject
+            ).issuer_name(
+                issuer
+            ).public_key(
+                private_key.public_key()
+            ).serial_number(
+                x509.random_serial_number()
+            ).not_valid_before(
+                datetime.utcnow()
+            ).not_valid_after(
+                datetime.utcnow() + timedelta(days=365)
+            )
+
+            # Добавляем альтернативные имена (исправленная версия)
+            san = x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.DNSName("127.0.0.1"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),  # Исправлено
+            ])
+
+            cert_builder = cert_builder.add_extension(san, critical=False)
+
+            # Подписываем сертификат
+            cert = cert_builder.sign(private_key, hashes.SHA256())
+
+            # Сохраняем приватный ключ
+            with open(self.key_path, "wb") as key_file:
+                key_file.write(private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.TraditionalOpenSSL,
+                    encryption_algorithm=serialization.NoEncryption(),
+                ))
+
+            # Сохраняем сертификат
+            with open(self.cert_path, "wb") as cert_file:
+                cert_file.write(cert.public_bytes(
+                    encoding=serialization.Encoding.PEM
+                ))
+
+            logger.info(f"✅ Самоподписанный сертификат создан: {self.cert_path}")
+            logger.info(f"✅ Приватный ключ создан: {self.key_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка генерации сертификата: {e}")
+            return False
+
+    def check_certificates_exist(self) -> bool:
+        """Проверяет существование сертификатов"""
+        return self.cert_path.exists() and self.key_path.exists()
+
+    def ensure_certificates_exist(self) -> bool:
+        """Убеждается, что сертификаты существуют, и создает их при необходимости"""
+        if not self.check_certificates_exist():
+            logger.warning("Сертификаты не найдены, генерируем новые...")
+            return self.generate_self_signed_certificate()
+        return True
+
+    def get_certificate_info(self) -> dict:
+        """Возвращает информацию о сертификате"""
+        if not self.cert_path.exists():
+            return {"error": "Сертификат не найден"}
+
+        try:
+            with open(self.cert_path, "rb") as cert_file:
+                cert_data = cert_file.read()
+                cert = x509.load_pem_x509_certificate(cert_data)
+
+                # Преобразуем subject и issuer в читаемый формат
+                subject_dict = {}
+                for attr in cert.subject:
+                    subject_dict[attr.oid._name] = attr.value
+
+                issuer_dict = {}
+                for attr in cert.issuer:
+                    issuer_dict[attr.oid._name] = attr.value
+
+                return {
+                    "subject": subject_dict,
+                    "issuer": issuer_dict,
+                    "not_valid_before": cert.not_valid_before.isoformat(),
+                    "not_valid_after": cert.not_valid_after.isoformat(),
+                    "serial_number": str(cert.serial_number),
+                    "version": cert.version.name,
+                }
+        except Exception as e:
+            return {"error": f"Ошибка чтения сертификата: {e}"}

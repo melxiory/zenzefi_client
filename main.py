@@ -1,145 +1,138 @@
-#!/usr/bin/env python3
-"""
-Тестирование ConfigManager + NginxManager
-"""
-
+# main.py
 import logging
 import time
 from pathlib import Path
-from core.config_manager import get_config
+from core.certificate_manager import CertificateManager
 from core.nginx_manager import NginxManager
+from core.config_manager import get_config
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('test.log', encoding='utf-8')
+    ]
 )
 
 logger = logging.getLogger(__name__)
 
 
+def test_certificate_manager():
+    """Тестирование менеджера сертификатов"""
+    print("🔐 Тестирование CertificateManager...")
+
+    nginx_dir = Path("nginx").absolute()
+    cert_manager = CertificateManager(nginx_dir)
+
+    # Проверяем существование сертификатов
+    if cert_manager.check_certificates_exist():
+        print("✅ Сертификаты уже существуют")
+        # Показываем информацию о сертификате
+        info = cert_manager.get_certificate_info()
+        print(f"📄 Информация о сертификате: {info}")
+    else:
+        print("⚠️ Сертификаты не найдены, генерируем...")
+        if cert_manager.generate_self_signed_certificate():
+            print("✅ Сертификаты успешно созданы")
+        else:
+            print("❌ Ошибка создания сертификатов")
+            return False
+
+    # Проверяем метод ensure
+    if cert_manager.ensure_certificates_exist():
+        print("✅ Сертификаты гарантированно существуют")
+    else:
+        print("❌ Ошибка гарантии существования сертификатов")
+
+    return True
+
+
 def test_config_manager():
-    """Тестирование ConfigManager"""
-    print("🧪 Тестирование ConfigManager")
-    print("=" * 50)
+    """Тестирование менеджера конфигурации"""
+    print("\n⚙️ Тестирование ConfigManager...")
 
     config = get_config()
 
-    # 1. Показываем текущие настройки
-    print("📋 Текущие настройки:")
-    print(f"   Порт: {config.get('proxy.local_port')}")
-    print(f"   URL: {config.get('proxy.remote_url')}")
-    print(f"   Автозапуск: {config.get('application.auto_start')}")
+    # Чтение конфигурации
+    proxy_config = config.get_proxy_config()
+    print(f"📋 Конфигурация прокси: {proxy_config}")
 
-    # 2. Валидация настроек
-    print("\n🔍 Валидация настроек:")
+    # Изменение конфигурации
+    new_port = 61001
+    config.set('proxy.local_port', new_port)
+    print(f"🔄 Изменен порт на: {new_port}")
+
+    # Проверка валидации
     is_valid, message = config.validate_proxy_config()
-    print(f"   {message}")
+    print(f"✅ Валидация конфигурации: {is_valid} - {message}")
 
-
-    # 4. Сохраняем настройки
+    # Сохранение
     if config.save():
-        print("   ✅ Настройки сохранены")
+        print("💾 Конфигурация сохранена")
     else:
-        print("   ❌ Ошибка сохранения настроек")
-        return False
+        print("❌ Ошибка сохранения конфигурации")
 
     return True
 
 
 def test_nginx_manager():
-    """Тестирование NginxManager"""
-    print("\n🚀 Тестирование NginxManager")
-    print("=" * 50)
+    """Тестирование менеджера nginx"""
+    print("\n🌐 Тестирование NginxManager...")
 
-    config = get_config()
-    manager = NginxManager()
+    nginx_manager = NginxManager()
 
-    # Получаем настройки из конфига
-    local_port = config.get('proxy.local_port', 61000)
-    remote_url = config.get('proxy.remote_url', 'https://zenzefi.melxiory.ru')
-
-    print(f"📍 Настройки из конфига:")
-    print(f"   Локальный порт: {local_port}")
-    print(f"   Удаленный URL: {remote_url}")
+    # Проверяем статус
+    status = nginx_manager.get_status()
+    print(f"📊 Статус nginx: {status}")
 
     # Запускаем nginx
-    print(f"\n🔄 Запуск nginx...")
-    if manager.start(local_port, remote_url):
-        print("✅ Nginx успешно запущен!")
-        print(f"🌐 Откройте: https://127.0.0.1:{local_port}")
+    print("🚀 Запуск nginx...")
+    if nginx_manager.start():
+        print("✅ Nginx запущен успешно")
 
-        # Добавляем в историю
-        config.add_connection_history(True, "Успешный тестовый запуск")
+        # Даем время поработать
+        time.sleep(5)
 
-        # Ждем
-        print("⏳ Nginx работает 10 секунд...")
-        time.sleep(100)
+        # Проверяем статус после запуска
+        status = nginx_manager.get_status()
+        print(f"📊 Статус после запуска: {status}")
 
         # Останавливаем
-        print("\n🛑 Останавливаем nginx...")
-        manager.stop()
-
-        return True
+        print("🛑 Остановка nginx...")
+        if nginx_manager.stop():
+            print("✅ Nginx остановлен успешно")
+        else:
+            print("❌ Ошибка остановки nginx")
+            return False
     else:
-        print("❌ Не удалось запустить nginx")
-        config.add_connection_history(False, "Ошибка запуска nginx")
+        print("❌ Ошибка запуска nginx")
         return False
 
-
-def show_history():
-    """Показывает историю подключений"""
-    print("\n📊 История подключений:")
-    print("=" * 50)
-
-    config = get_config()
-    history = config.get('history.connection_history', [])
-
-    if not history:
-        print("   История пуста")
-        return
-
-    for i, entry in enumerate(history[:5]):  # Последние 5 записей
-        from datetime import datetime
-        timestamp = datetime.fromtimestamp(entry['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
-        status = "✅" if entry['success'] else "❌"
-        print(f"   {i + 1}. {timestamp} {status} {entry['message']}")
+    return True
 
 
 def main():
     """Основная функция тестирования"""
-    print("🧪 Комплексное тестирование ConfigManager + NginxManager")
-    print("=" * 60)
+    print("🧪 Запуск тестирования всех модулей Zenzefi Client\n")
 
-    try:
-        # Тестируем ConfigManager
-        if not test_config_manager():
-            return
+    # Тестируем менеджер сертификатов
+    if not test_certificate_manager():
+        print("❌ Тест CertificateManager не пройден")
+        return
 
-        # Тестируем NginxManager
-        test_nginx_manager()
+    # Тестируем менеджер конфигурации
+    if not test_config_manager():
+        print("❌ Тест ConfigManager не пройден")
+        return
 
-        # Показываем историю
-        show_history()
+    # Тестируем менеджер nginx
+    if not test_nginx_manager():
+        print("❌ Тест NginxManager не пройден")
+        return
 
-        # Сохраняем финальные настройки
-        config = get_config()
-        config.set('application.last_test', time.time())
-        config.save()
-
-        print("\n" + "=" * 60)
-        print("🎉 Тестирование завершено!")
-        print("📁 Конфиг сохранен в:", get_config().config_path)
-
-    except KeyboardInterrupt:
-        print("\n🛑 Остановка по Ctrl+C")
-        # Останавливаем nginx если был запущен
-        manager = NginxManager()
-        manager.stop()
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+    print("\n🎉 Все тесты пройдены успешно!")
 
 
 if __name__ == "__main__":
