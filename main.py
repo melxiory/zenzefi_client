@@ -60,7 +60,7 @@ def test_config_manager():
     print(f"📋 Конфигурация прокси: {proxy_config}")
 
     # Изменение конфигурации
-    new_port = 61001
+    new_port = 61000
     config.set('proxy.local_port', new_port)
     print(f"🔄 Изменен порт на: {new_port}")
 

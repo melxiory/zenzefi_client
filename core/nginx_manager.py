@@ -163,15 +163,12 @@ http {{
             # SSL настройки для upstream
             proxy_ssl_verify off;
             proxy_ssl_server_name on;
-
-            # Клиентский сертификат УБРАН
         }}
     }}
 }}
 '''
         # Заменяем основной конфиг
-        conf_dir = self.nginx_dir / "conf"
-        main_conf_path = conf_dir / "nginx.conf"
+        main_conf_path = self.nginx_dir / "conf" / "nginx.conf"
         main_conf_path.write_text(full_config, encoding='utf-8')
         logger.info(f"📁 Основной nginx.conf перезаписан")
 

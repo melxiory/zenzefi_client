@@ -7,7 +7,7 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-import ipaddress  # Добавляем импорт
+import ipaddress
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +51,11 @@ class CertificateManager:
                 datetime.utcnow() + timedelta(days=365)
             )
 
-            # Добавляем альтернативные имена (исправленная версия)
+            # Добавляем альтернативные имена
             san = x509.SubjectAlternativeName([
                 x509.DNSName("localhost"),
                 x509.DNSName("127.0.0.1"),
-                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),  # Исправлено
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
             ])
 
             cert_builder = cert_builder.add_extension(san, critical=False)
@@ -115,13 +115,35 @@ class CertificateManager:
                 for attr in cert.issuer:
                     issuer_dict[attr.oid._name] = attr.value
 
+                # Используем новые свойства с UTC временем вместо устаревших
                 return {
                     "subject": subject_dict,
                     "issuer": issuer_dict,
-                    "not_valid_before": cert.not_valid_before.isoformat(),
-                    "not_valid_after": cert.not_valid_after.isoformat(),
+                    "not_valid_before_utc": cert.not_valid_before_utc.isoformat(),
+                    "not_valid_after_utc": cert.not_valid_after_utc.isoformat(),
                     "serial_number": str(cert.serial_number),
-                    "version": cert.version.name,
+                    "version": f"v{cert.version.value}",
                 }
         except Exception as e:
             return {"error": f"Ошибка чтения сертификата: {e}"}
+
+    def get_certificate_days_remaining(self) -> int:
+        """Возвращает количество дней до истечения срока действия сертификата"""
+        if not self.cert_path.exists():
+            return -1
+
+        try:
+            with open(self.cert_path, "rb") as cert_file:
+                cert_data = cert_file.read()
+                cert = x509.load_pem_x509_certificate(cert_data)
+
+                # Используем UTC время
+                now = datetime.utcnow().replace(tzinfo=None)
+                expiration = cert.not_valid_after_utc
+
+                days_remaining = (expiration - now).days
+                return max(0, days_remaining)
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки срока действия сертификата: {e}")
+            return -1

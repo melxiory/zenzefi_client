@@ -32,7 +32,6 @@ class ConfigManager:
                 'enabled': False,
                 'local_port': 61000,
                 'remote_url': 'https://zenzefi.melxiory.ru',
-                # certificate_path УБРАН
             },
 
             # Настройки приложения
@@ -116,7 +115,7 @@ class ConfigManager:
         except:
             return default
 
-    def set(self, key: str, value: Any, save: bool = True) -> bool:
+    def set(self, key: str, value: Any, save: bool = False) -> bool:
         """Устанавливает значение по ключу (dot notation)"""
         try:
             keys = key.split('.')
