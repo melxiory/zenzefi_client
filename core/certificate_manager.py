@@ -137,9 +137,9 @@ class CertificateManager:
                 cert_data = cert_file.read()
                 cert = x509.load_pem_x509_certificate(cert_data)
 
-                # Используем UTC время
+                # Используем UTC время для обоих значений
                 now = datetime.utcnow().replace(tzinfo=None)
-                expiration = cert.not_valid_after_utc
+                expiration = cert.not_valid_after_utc.replace(tzinfo=None)
 
                 days_remaining = (expiration - now).days
                 return max(0, days_remaining)
