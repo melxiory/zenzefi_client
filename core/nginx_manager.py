@@ -15,6 +15,8 @@ class NginxManager:
         self.is_running = False
         self.nginx_dir = Path("nginx").absolute()
         self.process_manager = get_process_manager()
+        self.remote_url = ""
+        self.local_port = 61000
 
     def start(self, local_port=61000, remote_url="https://zenzefi.melxiory.ru"):
         """Запуск nginx прокси с фиксированным портом"""
@@ -81,6 +83,8 @@ class NginxManager:
 
             # Генерируем кастомный конфиг
             self._generate_custom_config(local_port, remote_url)
+            self.remote_url = remote_url
+            self.local_port = local_port
 
             # Запускаем nginx
             logger.info("🚀 Запускаем nginx...")
@@ -209,13 +213,13 @@ http {{
 
     def get_status(self):
         """Возвращает статус"""
-        port_available, port_message = check_port_availability(61000)
+        port_available, port_message = check_port_availability(self.local_port)
 
         status = {
             'running': self.is_running,
             'port_available': port_available,
-            'port': 61000,
-            'url': 'https://zenzefi.melxiory.ru',
+            'port': self.local_port,
+            'url': self.remote_url,
             'is_admin': self.process_manager.is_admin
         }
 
