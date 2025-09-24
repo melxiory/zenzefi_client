@@ -3,10 +3,11 @@ import sys
 import logging
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon
 from core.certificate_manager import CertificateManager
+from core.nginx_manager import NginxManager
 from ui.tray_icon import TrayIcon
-from ui.main_window import MainWindow
+from PySide6.QtGui import QIcon
+from ui.icons import get_icon_manager
 
 # Настройка логирования
 logging.basicConfig(
@@ -36,25 +37,24 @@ def ensure_certificates():
         return False
 
 def main():
-    """Основная функция приложения"""
-    # Проверяем зависимости
-    try:
-        from PySide6 import QtCore
-    except ImportError:
-        print("❌ PySide6 не установлен. Установите: pip install PySide6")
-        return 1
-
     # Создаем приложение
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)  # Не завершать приложение при закрытии окна
+    app.setQuitOnLastWindowClosed(False)
+
+    # Устанавливаем иконку приложения
+    icon_manager = get_icon_manager()
+    app.setWindowIcon(icon_manager.get_icon("window_img.png"))
 
     # Проверяем сертификаты
     if not ensure_certificates():
         print("❌ Ошибка инициализации сертификатов. Проверьте логи.")
         return 1
 
+    # Создаем единый экземпляр NginxManager
+    nginx_manager = NginxManager()
+
     # Создаем иконку в трее
-    tray_icon = TrayIcon(app)
+    tray_icon = TrayIcon(app, nginx_manager)
     tray_icon.show()
 
     # Показываем главное окно при запуске (опционально)
@@ -72,8 +72,6 @@ def main():
     finally:
         # Гарантируем остановку nginx при выходе
         try:
-            from core.nginx_manager import NginxManager
-            nginx_manager = NginxManager()
             nginx_manager.stop()
         except:
             pass

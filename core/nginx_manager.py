@@ -182,7 +182,7 @@ http {{
 
         location / {{
             proxy_pass {remote_url};
-            proxy_set_header Host zenzefi.melxiory.ru;
+            proxy_set_header Host {remote_url.split('//')[1]};
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
@@ -228,10 +228,3 @@ http {{
             status['port_message'] = port_message
 
         return status
-
-    def restart(self):
-        """Перезапуск nginx"""
-        if self.stop():
-            time.sleep(3)
-            return self.start()
-        return False

@@ -1,11 +1,13 @@
 # ui/main_window.py
-import sys
 import logging
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                                QWidget, QPushButton, QTextEdit, QLineEdit, QLabel,
                                QGroupBox, QStatusBar, QMessageBox)
-from PySide6.QtCore import QTimer, Qt, QThread, Signal, QObject
+from PySide6.QtCore import QTimer, QThread, Signal, QObject
 from PySide6.QtGui import QTextCursor, QFont
+from ui.icons import get_icon_manager
+from ui.styles import STYLESHEET
+from ui.colors import COLORS
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +38,11 @@ class NginxManagerThread(QThread):
     log_signal = Signal(str)
     status_signal = Signal(dict)
 
-    def __init__(self):
+    def __init__(self, nginx_manager):
         super().__init__()
-        from core.nginx_manager import NginxManager
-        from core.config_manager import get_config
-        self.nginx_manager = NginxManager()
-        self.config = get_config()
+        self.nginx_manager = nginx_manager
         self.action = None
-        self.remote_url = "https://zenzefi.melxiory.ru"
+        self.remote_url = ""
 
     def set_action(self, action, remote_url=None):
         self.action = action
@@ -83,13 +82,19 @@ class NginxManagerThread(QThread):
             self.log_signal.emit(f"❌ Ошибка остановки Nginx: {e}")
 
     def restart_nginx(self):
-        self.nginx_manager.restart()
+        self.stop_nginx()
+        self.start_nginx()
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, nginx_manager):
         super().__init__()
+        self.nginx_manager = nginx_manager
         self.nginx_thread = None
+
+        # Устанавливаем стиль
+        self.setStyleSheet(STYLESHEET)
+
         from core.config_manager import get_config
         self.config = get_config()
 
@@ -107,8 +112,18 @@ class MainWindow(QMainWindow):
         self.status_timer.start(5000)
 
     def setup_ui(self):
-        self.setWindowTitle("Zenzefi Client - Прокси сервер")
+        self.setWindowTitle("Zenzefi Client")
         self.setGeometry(100, 100, 800, 600)
+        self.setStyleSheet(f"""
+                QMainWindow {{
+                    background-color: {COLORS['primary_bg']};
+                    color: {COLORS['text_primary']};
+                }}
+            """)
+
+        # Устанавливаем иконку окна
+        icon_manager = get_icon_manager()
+        self.setWindowIcon(icon_manager.get_icon("window_img.png"))
 
         # Центральный виджет
         central_widget = QWidget()
@@ -123,7 +138,7 @@ class MainWindow(QMainWindow):
         url_layout = QHBoxLayout()
         url_layout.addWidget(QLabel("URL для проксирования:"))
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("https://zenzefi.melxiory.ru")
+        self.url_input.setPlaceholderText("Введите адрес")
         url_layout.addWidget(self.url_input)
         proxy_layout.addLayout(url_layout)
 
@@ -149,9 +164,21 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_group)
 
         self.log_text = QTextEdit()
+        self.log_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {COLORS['secondary_bg']};
+                color: {COLORS['text_secondary']};
+                border: 1px solid {COLORS['secondary_bg']};
+                border-radius: 3px;
+                font-family: 'Courier New';
+                font-size: 14px;
+                selection-background-color: {COLORS['button_active']};
+            }}
+        """)
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Courier", 9))
         log_layout.addWidget(self.log_text)
+
 
         # Кнопки для логов
         log_buttons_layout = QHBoxLayout()
@@ -174,6 +201,36 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Готов к работе")
 
         self.update_buttons_state()
+
+        # Кастомные стили для кнопок
+        button_style = f"""
+            QPushButton {{
+                background-color: {COLORS['accent_blue']};
+                color: {COLORS['accent_white']};
+                border: 1px solid {COLORS['secondary_bg']};
+                border-radius: 3px;
+                padding: 8px 15px;
+                font-weight: bold;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['button_active']};
+                border: 1px solid {COLORS['accent_silver']};
+            }}
+            QPushButton:pressed {{
+                background-color: {COLORS['accent_red']};
+            }}
+            QPushButton:disabled {{
+                background-color: {COLORS['secondary_bg']};
+                color: {COLORS['button_hover']};
+            }}
+            """
+
+        self.start_btn.setStyleSheet(button_style)
+        self.stop_btn.setStyleSheet(button_style)
+        self.restart_btn.setStyleSheet(button_style)
+        self.clear_log_btn.setStyleSheet(button_style)
+        self.copy_log_btn.setStyleSheet(button_style)
 
     def setup_logging(self):
         """Настраивает логирование в GUI"""
@@ -205,7 +262,7 @@ class MainWindow(QMainWindow):
 
     def load_config(self):
         """Загружает конфигурацию"""
-        remote_url = self.config.get('proxy.remote_url', 'https://zenzefi.melxiory.ru')
+        remote_url = self.config.get('proxy.remote_url', 'Введите адрес')
         self.url_input.setText(remote_url)
 
     def save_config(self):
@@ -215,7 +272,6 @@ class MainWindow(QMainWindow):
             if remote_url:
                 self.config.set('proxy.remote_url', remote_url)
                 self.config.save()
-                logger.info("Конфигурация сохранена")
         except Exception as e:
             logger.error(f"Ошибка сохранения конфига: {e}")
 
@@ -248,7 +304,7 @@ class MainWindow(QMainWindow):
         if self.nginx_thread and self.nginx_thread.isRunning():
             return
 
-        self.nginx_thread = NginxManagerThread()
+        self.nginx_thread = NginxManagerThread(self.nginx_manager)
         self.nginx_thread.set_action(action, remote_url)
         self.nginx_thread.log_signal.connect(self.add_log_message)
         self.nginx_thread.status_signal.connect(self.handle_status_update)
@@ -269,8 +325,6 @@ class MainWindow(QMainWindow):
     def update_status(self):
         """Обновляет статус"""
         if not self.nginx_thread or not self.nginx_thread.isRunning():
-            from core.nginx_manager import NginxManager
-            self.nginx_manager = NginxManager()
             status = self.nginx_manager.get_status()
             self.handle_status_update(status)
 
@@ -278,14 +332,20 @@ class MainWindow(QMainWindow):
         """Обновляет отображение статуса"""
         if hasattr(self, 'current_status'):
             status = self.current_status
+
             if status['running']:
                 status_text = f"✅ Nginx запущен - https://127.0.0.1:{status['port']} → {status['url']}"
+                text_color = COLORS['success']  # Зеленый для запущенного
             else:
                 status_text = "❌ Nginx остановлен"
+                text_color = COLORS['error']  # Красный для остановленного
 
             if not status['port_available'] and 'port_message' in status:
                 status_text += f" | {status['port_message']}"
+                text_color = "#FFA500"  # Оранжевый для предупреждения
 
+            # Только цвет текста, без фона
+            self.status_bar.setStyleSheet(f"color: {text_color};")
             self.status_bar.showMessage(status_text)
 
     def update_buttons_state(self, enabled=True):
@@ -311,10 +371,6 @@ class MainWindow(QMainWindow):
                                          QMessageBox.No)
 
             if reply == QMessageBox.Yes:
-                # Останавливаем nginx перед выходом
-                from core.nginx_manager import NginxManager
-                self.nginx_manager = NginxManager()
-                self.nginx_manager.stop()
                 event.accept()
             else:
                 event.ignore()
