@@ -10,14 +10,24 @@ from PySide6.QtGui import QIcon
 from ui.icons import get_icon_manager
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('zenzefi_client.log', encoding='utf-8')
-    ]
-)
+def setup_logging():
+    """Настраивает логирование"""
+    from core.config_manager import get_app_data_dir
+    app_data_dir = get_app_data_dir()
+    logs_dir = app_data_dir / "logs"
+    logs_dir.mkdir(exist_ok=True)
+
+    log_file = logs_dir / "zenzefi_client.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding='utf-8')
+        ]
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +35,7 @@ def ensure_certificates():
     """Проверяет и создает сертификаты при необходимости"""
     try:
         nginx_dir = Path("nginx").absolute()
-        cert_manager = CertificateManager(nginx_dir)
+        cert_manager = CertificateManager()
         if cert_manager.ensure_certificates_exist():
             logger.info("✅ Сертификаты готовы")
         else:
@@ -44,6 +54,7 @@ def main():
     # Устанавливаем иконку приложения
     icon_manager = get_icon_manager()
     app.setWindowIcon(icon_manager.get_icon("window_img.png"))
+    setup_logging()
 
     # Проверяем сертификаты
     if not ensure_certificates():

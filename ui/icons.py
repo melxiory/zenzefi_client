@@ -1,4 +1,5 @@
 # ui/icons.py
+import sys
 from pathlib import Path
 from PySide6.QtGui import QIcon, QPixmap, Qt
 
@@ -9,7 +10,15 @@ class IconManager:
 
     def get_icon(self, icon_name):
         """Возвращает иконку по имени файла"""
-        icon_path = self.resources_dir / icon_name
+        if getattr(sys, 'frozen', False):
+            if hasattr(sys, '_MEIPASS'):
+                icon_path = Path(sys._MEIPASS) / "resources" / icon_name
+                if icon_path.exists():
+                    return QIcon(str(icon_path))
+            else:
+                icon_path = self.resources_dir / icon_name
+        else:
+            icon_path = self.resources_dir / icon_name
         if icon_path.exists():
             return QIcon(str(icon_path))
         else:

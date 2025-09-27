@@ -1,4 +1,5 @@
 import json
+import sys
 import logging
 import time
 from pathlib import Path
@@ -8,6 +9,28 @@ import os
 logger = logging.getLogger(__name__)
 
 
+def get_app_data_dir():
+    """Возвращает путь для хранения данных приложения"""
+    if getattr(sys, 'frozen', False):
+        # В portable режиме используем _MEIPASS для временных файлов
+        if hasattr(sys, '_MEIPASS'):
+            # Для рабочих файлов (конфиги, логи, сертификаты) используем AppData
+            if os.name == 'nt':  # Windows
+                appdata_dir = Path(os.getenv('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
+                app_data_dir = appdata_dir / 'Zenzefi'
+            else:  # Linux/Mac
+                app_data_dir = Path.home() / '.config' / 'zenzefi'
+        else:
+            # Dev режим
+            app_data_dir = Path(__file__).parent.parent / 'app_data'
+    else:
+        # Dev режим
+        app_data_dir = Path(__file__).parent.parent / 'app_data'
+
+    app_data_dir.mkdir(parents=True, exist_ok=True)
+    return app_data_dir
+
+
 class ConfigManager:
     def __init__(self):
         self.config_path = self._get_config_path()
@@ -15,47 +38,27 @@ class ConfigManager:
 
     def _get_config_path(self) -> Path:
         """Возвращает путь к файлу конфигурации"""
-        if os.name == 'nt':  # Windows
-            appdata_dir = Path(os.getenv('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
-            config_dir = appdata_dir / 'Zenzefi'
-        else:  # Linux/Mac
-            config_dir = Path.home() / '.config' / 'zenzefi'
+        config_dir = get_app_data_dir()
 
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir / 'config.json'
 
-    def _get_default_config(self) -> Dict[str, Any]:
+    def _get_default_config(self) -> dict:
         """Возвращает конфигурацию по умолчанию"""
         return {
-            # Настройки прокси
             'proxy': {
                 'enabled': False,
                 'local_port': 61000,
-                'remote_url': 'https://zenzefi.melxiory.ru',
+                'remote_url': '',  # Пустая строка вместо дефолтного URL
             },
-
-            # Настройки приложения
             'application': {
                 'auto_start': False,
                 'minimize_to_tray': True,
                 'start_minimized': False,
-                'check_updates': True,
             },
-
-            # Настройки UI
             'ui': {
                 'window_width': 800,
                 'window_height': 600,
-                'window_x': None,
-                'window_y': None,
-                'theme': 'system',
-            },
-
-            # История и логи
-            'history': {
-                'last_used_certificate': None,
-                'connection_history': [],
-                'last_update_check': None,
             }
         }
 

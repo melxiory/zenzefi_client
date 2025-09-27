@@ -13,10 +13,15 @@ logger = logging.getLogger(__name__)
 
 
 class CertificateManager:
-    def __init__(self, nginx_dir: Path):
-        self.nginx_dir = nginx_dir
-        self.cert_path = nginx_dir / "fake.crt"
-        self.key_path = nginx_dir / "fake.key"
+    def __init__(self):
+        # Сертификаты храним в подпапке certificates
+        from core.config_manager import get_app_data_dir
+        app_data_dir = get_app_data_dir()
+        certs_dir = app_data_dir / "certificates"
+        certs_dir.mkdir(exist_ok=True)
+
+        self.cert_path = certs_dir / "fake.crt"
+        self.key_path = certs_dir / "fake.key"
 
     def generate_self_signed_certificate(self) -> bool:
         """Генерирует самоподписанный сертификат для localhost"""
