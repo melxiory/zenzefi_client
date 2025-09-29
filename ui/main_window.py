@@ -92,8 +92,10 @@ class MainWindow(QMainWindow):
         self.nginx_manager = nginx_manager
         self.nginx_thread = None
 
+        self.setup_ui()
+
         # Устанавливаем стиль
-        self.setStyleSheet(STYLESHEET)
+        self.apply_theme()
 
         from core.config_manager import get_config
         self.config = get_config()
@@ -101,7 +103,6 @@ class MainWindow(QMainWindow):
         # Создаем эмиттер для логов
         self.log_emitter = LogEmitter()
 
-        self.setup_ui()
         self.setup_logging()
         self.load_config()
         self.update_status()
@@ -114,12 +115,6 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         self.setWindowTitle("Zenzefi Client")
         self.setGeometry(100, 100, 800, 600)
-        self.setStyleSheet(f"""
-                QMainWindow {{
-                    background-color: {COLORS['primary_bg']};
-                    color: {COLORS['text_primary']};
-                }}
-            """)
 
         # Устанавливаем иконку окна
         icon_manager = get_icon_manager()
@@ -164,21 +159,9 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_group)
 
         self.log_text = QTextEdit()
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {COLORS['secondary_bg']};
-                color: {COLORS['text_secondary']};
-                border: 1px solid {COLORS['secondary_bg']};
-                border-radius: 3px;
-                font-family: 'Courier New';
-                font-size: 14px;
-                selection-background-color: {COLORS['button_active']};
-            }}
-        """)
         self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Courier", 9))
+        self.log_text.setFont(QFont("Courier", 14))
         log_layout.addWidget(self.log_text)
-
 
         # Кнопки для логов
         log_buttons_layout = QHBoxLayout()
@@ -201,36 +184,6 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Готов к работе")
 
         self.update_buttons_state()
-
-        # Кастомные стили для кнопок
-        button_style = f"""
-            QPushButton {{
-                background-color: {COLORS['accent_blue']};
-                color: {COLORS['accent_white']};
-                border: 1px solid {COLORS['secondary_bg']};
-                border-radius: 3px;
-                padding: 8px 15px;
-                font-weight: bold;
-                min-width: 80px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['button_active']};
-                border: 1px solid {COLORS['accent_silver']};
-            }}
-            QPushButton:pressed {{
-                background-color: {COLORS['accent_red']};
-            }}
-            QPushButton:disabled {{
-                background-color: {COLORS['secondary_bg']};
-                color: {COLORS['button_hover']};
-            }}
-            """
-
-        self.start_btn.setStyleSheet(button_style)
-        self.stop_btn.setStyleSheet(button_style)
-        self.restart_btn.setStyleSheet(button_style)
-        self.clear_log_btn.setStyleSheet(button_style)
-        self.copy_log_btn.setStyleSheet(button_style)
 
     def setup_logging(self):
         """Настраивает логирование в GUI"""
@@ -333,12 +286,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'current_status'):
             status = self.current_status
 
+            from ui.theme_manager import get_theme_manager
+            theme_manager = get_theme_manager()
+            colors = theme_manager.get_current_colors()
+
             if status['running']:
                 status_text = f"✅ Nginx запущен - https://127.0.0.1:{status['port']} → {status['url']}"
-                text_color = COLORS['success']
+                text_color = colors['success']
             else:
                 status_text = "❌ Nginx остановлен"
-                text_color = COLORS['error']
+                text_color = colors['error']
 
             # Улучшенная информация о порте
             if not status['port_available']:
@@ -349,7 +306,8 @@ class MainWindow(QMainWindow):
                     status_text += f" | {status['port_message']}"
                     text_color = "#FFA500"  # Оранжевый
 
-            self.status_bar.setStyleSheet(f"color: {text_color};")
+            # Используем цвет из текущей темы для статус бара
+            self.status_bar.setStyleSheet(f"color: {text_color}; background-color: {colors['header_bg']};")
             self.status_bar.showMessage(status_text)
 
     def update_buttons_state(self, enabled=True):
@@ -380,3 +338,44 @@ class MainWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+
+    def apply_theme(self):
+        """Применяет текущую тему Mercedes-Benz"""
+        from ui.theme_manager import get_theme_manager
+        theme_manager = get_theme_manager()
+
+        stylesheet = theme_manager.get_stylesheet()
+        colors = theme_manager.get_current_colors()
+
+        # Добавляем стиль для заголовка окна
+        enhanced_stylesheet = stylesheet + f"""
+                    QMainWindow {{
+                        background-color: {colors['primary_bg']};
+                        color: {colors['text_primary']};
+                    }}
+                    QMainWindow::title {{
+                        background-color: {colors['header_bg']};
+                        color: {colors['accent_white']};
+                    }}
+                """
+
+        self.setStyleSheet(enhanced_stylesheet)
+
+        # Настраиваем QTextEdit для логов (специфичные настройки)
+        log_style = f"""
+            QTextEdit {{
+                background-color: {colors['input_bg']};
+                color: {colors['text_secondary']};
+                border: 1px solid {colors['border_dark']};
+                border-radius: 3px;
+                font-family: 'Courier New';
+                selection-background-color: {colors['button_active']};
+            }}
+        """
+        self.log_text.setStyleSheet(log_style)
+
+        # Обновляем статус бар
+        self.update_status_display()
+
+        # Принудительное обновление интерфейса
+        self.update()

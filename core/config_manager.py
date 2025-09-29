@@ -51,13 +51,16 @@ class ConfigManager:
                 'local_port': 61000,
                 'remote_url': '',
             },
+
             'application': {
                 'auto_start': False,
                 'minimize_to_tray': True,
                 'start_minimized': False,
-                'single_instance': True,  # ← Новая настройка
-                'show_already_running_message': True,  # ← Новая настройка
+                'single_instance': True,
+                'show_already_running_message': True,
+                'theme': 'dark'  # ← ДОБАВЬТЕ ЭТУ СТРОКУ
             },
+
             'ui': {
                 'window_width': 800,
                 'window_height': 600,

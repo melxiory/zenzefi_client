@@ -33,6 +33,9 @@ class TrayIcon(QSystemTrayIcon):
         show_action = QAction("Показать окно", self)
         show_action.triggered.connect(self.show_main_window)
 
+        theme_action = QAction("Переключить тему", self)
+        theme_action.triggered.connect(self.toggle_theme)
+
         start_action = QAction("Запуск Nginx", self)
         start_action.triggered.connect(self.start_nginx)
 
@@ -42,6 +45,8 @@ class TrayIcon(QSystemTrayIcon):
         restart_action = QAction("Перезапуск Nginx", self)
         restart_action.triggered.connect(self.restart_nginx)
 
+        menu.addAction(theme_action)
+        menu.addSeparator()
         menu.addAction(show_action)
         menu.addSeparator()
         menu.addAction(start_action)
@@ -195,3 +200,21 @@ class TrayIcon(QSystemTrayIcon):
         except Exception as e:
             logger.error(f"Ошибка проверки единственного экземпляра: {e}")
             return True
+
+    def toggle_theme(self):
+        """Переключает тему приложения"""
+        from ui.theme_manager import get_theme_manager
+        theme_manager = get_theme_manager()
+
+        new_theme = theme_manager.toggle_theme()
+
+        # Обновляем стиль главного окна если оно открыто
+        if self.main_window:
+            self.main_window.apply_theme()
+
+        self.showMessage(
+            "Zenzefi Client",
+            f"Тема переключена: {'Светлая' if new_theme == 'light' else 'Тёмная'}",
+            QSystemTrayIcon.Information,
+            2000
+        )
