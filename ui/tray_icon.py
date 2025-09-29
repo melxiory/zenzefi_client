@@ -155,10 +155,27 @@ class TrayIcon(QSystemTrayIcon):
 
     def exit_app(self):
         """Выход из приложения"""
-        reply = QMessageBox.question(None, 'Подтверждение выхода',
-                                     'Вы уверены, что хотите выйти? Nginx будет остановлен.',
-                                     QMessageBox.Yes | QMessageBox.No,
-                                     QMessageBox.No)
+        icon_manager = get_icon_manager()
+
+        # Создаем кастомный QMessageBox
+        msg_box = QMessageBox()
+
+        # Устанавливаем иконку окна
+        msg_box.setWindowIcon(icon_manager.get_icon("window_img.png"))
+
+        # Настраиваем содержимое
+        msg_box.setWindowTitle('Подтверждение выхода')
+        msg_box.setText('Вы уверены, что хотите выйти? Nginx будет остановлен.')
+        msg_box.setIcon(QMessageBox.Question)
+
+        # Добавляем кнопки
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+
+        # Показываем диалог и возвращаем результат
+        reply = msg_box.exec()
+
+
 
         if reply == QMessageBox.Yes:
             try:
@@ -168,3 +185,13 @@ class TrayIcon(QSystemTrayIcon):
                 logger.error(f"Ошибка при остановке nginx: {e}")
 
             self.app.quit()
+
+    def check_single_instance(self):
+        """Проверяет, является ли этот экземпляр единственным"""
+        try:
+            from utils.single_instance import get_single_instance
+            instance_lock = get_single_instance(51000)
+            return not instance_lock.check_already_running()
+        except Exception as e:
+            logger.error(f"Ошибка проверки единственного экземпляра: {e}")
+            return True

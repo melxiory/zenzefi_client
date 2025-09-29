@@ -76,17 +76,20 @@ class NginxManager:
                 logger.error(f"nginx.exe не найден в {self.nginx_dir}")
                 return False
 
-            # Останавливаем все наши nginx процессы
-            logger.info("🛑 Останавливаем все nginx процессы...")
-            terminated_count = self.process_manager.terminate_all_nginx()
-            logger.info(f"✅ Завершено процессов nginx: {terminated_count}")
-            time.sleep(2)
-
-            # Проверяем доступность порта
+            # Улучшенная проверка порта
             port_available, port_message = check_port_availability(local_port)
 
+            # Если порт занят, проверяем не нашим ли приложением
+            if not port_available and self.is_port_in_use_by_us(local_port):
+                logger.info("⚠️ Порт занят нашим приложением, пытаемся перезапустить...")
+                # Останавливаем наш старый процесс
+                self.stop()
+                time.sleep(2)
+                # Проверяем порт снова
+                port_available, port_message = check_port_availability(local_port)
+
             if not port_available:
-                # Порт занят - пытаемся завершить процесс
+                # Остальная логика обработки занятого порта...
                 process_info = get_process_using_port(local_port)
                 if process_info:
                     logger.warning(f"⚠️ {port_message}")
@@ -122,10 +125,10 @@ class NginxManager:
                             f"• Проверьте другие экземпляры программы"
                         )
 
-                    # Здесь можно показать сообщение пользователю через UI
                     logger.error(user_msg)
                     return False
 
+            # Остальная логика запуска...
             # Генерируем кастомный конфиг
             self._generate_custom_config(local_port, remote_url)
             self.remote_url = remote_url
@@ -375,10 +378,12 @@ class NginxManager:
     def get_status(self):
         """Возвращает статус"""
         port_available, port_message = check_port_availability(self.local_port)
+        port_used_by_us = self.is_port_in_use_by_us(self.local_port) if not port_available else False
 
         status = {
             'running': self.is_running,
             'port_available': port_available,
+            'port_used_by_us': port_used_by_us,  # ← Новая информация
             'port': self.local_port,
             'url': self.remote_url,
             'is_admin': self.process_manager.is_admin
@@ -387,5 +392,38 @@ class NginxManager:
         # Добавляем сообщение только если оно есть
         if port_message:
             status['port_message'] = port_message
+        if port_used_by_us:
+            status['port_message'] = "Порт занят нашим приложением (возможно старый процесс)"
 
         return status
+
+    def is_port_in_use_by_us(self, port: int) -> bool:
+        """Проверяет, занят ли порт нашим приложением"""
+        from utils.port_utils import get_process_using_port
+        import psutil
+        from pathlib import Path
+
+        process_info = get_process_using_port(port)
+        if not process_info:
+            return False
+
+        # Проверяем, что это наш nginx процесс
+        if not self.nginx_dir:
+            return False
+
+        try:
+            process = psutil.Process(process_info['pid'])
+            exe_path = Path(process.exe())
+
+            # Проверяем что процесс nginx и находится в нашей папке
+            is_nginx = process_info['name'] and 'nginx' in process_info['name'].lower()
+            is_our_path = self.nginx_dir in exe_path.parents
+
+            logger.debug(f"Проверка процесса: {process_info['name']}, PID: {process_info['pid']}")
+            logger.debug(f"Путь: {exe_path}, наш путь: {is_our_path}")
+
+            return is_nginx and is_our_path
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError) as e:
+            logger.debug(f"Не удалось проверить процесс на порту {port}: {e}")
+            return False

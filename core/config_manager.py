@@ -49,12 +49,14 @@ class ConfigManager:
             'proxy': {
                 'enabled': False,
                 'local_port': 61000,
-                'remote_url': '',  # Пустая строка вместо дефолтного URL
+                'remote_url': '',
             },
             'application': {
                 'auto_start': False,
                 'minimize_to_tray': True,
                 'start_minimized': False,
+                'single_instance': True,  # ← Новая настройка
+                'show_already_running_message': True,  # ← Новая настройка
             },
             'ui': {
                 'window_width': 800,

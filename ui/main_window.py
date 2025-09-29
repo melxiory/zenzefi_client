@@ -335,16 +335,20 @@ class MainWindow(QMainWindow):
 
             if status['running']:
                 status_text = f"✅ Nginx запущен - https://127.0.0.1:{status['port']} → {status['url']}"
-                text_color = COLORS['success']  # Зеленый для запущенного
+                text_color = COLORS['success']
             else:
                 status_text = "❌ Nginx остановлен"
-                text_color = COLORS['error']  # Красный для остановленного
+                text_color = COLORS['error']
 
-            if not status['port_available'] and 'port_message' in status:
-                status_text += f" | {status['port_message']}"
-                text_color = "#FFA500"  # Оранжевый для предупреждения
+            # Улучшенная информация о порте
+            if not status['port_available']:
+                if status.get('port_used_by_us', False):
+                    status_text += " | ⚠️ Порт занят нашим приложением"
+                    text_color = "#FFA500"  # Оранжевый
+                elif 'port_message' in status:
+                    status_text += f" | {status['port_message']}"
+                    text_color = "#FFA500"  # Оранжевый
 
-            # Только цвет текста, без фона
             self.status_bar.setStyleSheet(f"color: {text_color};")
             self.status_bar.showMessage(status_text)
 
