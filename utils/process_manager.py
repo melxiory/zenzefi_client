@@ -46,9 +46,8 @@ class ProcessManager:
         try:
             if hasattr(process, 'exe') and process.exe():
                 exe_path = Path(process.exe())
-                # Проверяем, находится ли процесс в нашей папке nginx
-                nginx_dir = Path("nginx").absolute()
-                return nginx_dir in exe_path.parents
+                # Проверяем по имени процесса (Python или наш EXE)
+                return 'python' in process.name().lower() or 'zenzefi' in process.name().lower()
             return False
         except (psutil.AccessDenied, AttributeError):
             return False
@@ -99,82 +98,6 @@ class ProcessManager:
                 terminated_count += 1
 
         return terminated_count
-
-    def terminate_all_nginx(self) -> int:
-        """Завершает все процессы nginx с многоуровневой стратегией"""
-        logger.info(f"🔧 Запуск остановки nginx процессов (админ: {self.is_admin})")
-
-        # Шаг 1: Graceful shutdown через nginx команду
-        graceful_stopped = self._graceful_nginx_shutdown()
-        if graceful_stopped:
-            return graceful_stopped
-
-        # Шаг 2: Обычное завершение процессов
-        processes = self.get_process_info("nginx.exe")
-        terminated_count = 0
-
-        for proc_info in processes:
-            if proc_info['can_manage']:
-                if self.terminate_process(proc_info['pid'], force=False):
-                    terminated_count += 1
-
-        # Шаг 3: Если процессы остались, принудительное завершение
-        if terminated_count < len([p for p in processes if p['can_manage']]):
-            time.sleep(2)
-            remaining_processes = self.get_process_info("nginx.exe")
-            for proc_info in remaining_processes:
-                if proc_info['can_manage']:
-                    if self.terminate_process(proc_info['pid'], force=True):
-                        terminated_count += 1
-
-        # Шаг 4: Используем taskkill для надежности
-        self._use_taskkill()
-
-        return terminated_count
-
-    def _graceful_nginx_shutdown(self) -> int:
-        """Пытается graceful shutdown через nginx -s quit"""
-        try:
-            nginx_dir = Path("nginx").absolute()
-            nginx_exe = nginx_dir / "nginx.exe"
-
-            if nginx_exe.exists():
-                result = subprocess.run(
-                    [str(nginx_exe), "-s", "quit"],
-                    cwd=str(nginx_dir),
-                    capture_output=True,
-                    timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                if result.returncode == 0:
-                    logger.info("✅ Graceful shutdown nginx выполнен")
-                    return 1
-        except Exception as e:
-            logger.debug(f"Graceful shutdown не удался: {e}")
-
-        return 0
-
-    def _use_taskkill(self):
-        """Использует taskkill для завершения процессов"""
-        try:
-            if self.is_admin:
-                # С правами админа - принудительно завершаем все
-                subprocess.run(
-                    ["taskkill", "/f", "/im", "nginx.exe"],
-                    capture_output=True,
-                    timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-            else:
-                # Без прав админа - пытаемся завершить нормально
-                subprocess.run(
-                    ["taskkill", "/im", "nginx.exe"],
-                    capture_output=True,
-                    timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-        except Exception as e:
-            logger.debug(f"Ошибка taskkill: {e}")
 
     def is_process_running(self, process_name: str) -> bool:
         """Проверяет, запущен ли процесс"""

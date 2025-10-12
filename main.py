@@ -82,7 +82,7 @@ def main():
         logger.info("🚀 Запуск Zenzefi Client")
 
         # Инициализация менеджеров
-        from core.nginx_manager import NginxManager
+        from core.proxy_manager import get_proxy_manager
         from core.certificate_manager import CertificateManager
 
         # Проверяем сертификаты
@@ -97,8 +97,8 @@ def main():
             instance_lock.unlock()
             return 1
 
-        # Создаем менеджер nginx
-        nginx_manager = NginxManager()
+        # Создаем менеджер прокси
+        proxy_manager = get_proxy_manager()
 
         # Создаем и показываем главное окно или трей
         from core.config_manager import get_config
@@ -108,12 +108,12 @@ def main():
         main_window = None
         if not start_minimized:
             from ui.main_window import MainWindow
-            main_window = MainWindow(nginx_manager)
+            main_window = MainWindow(proxy_manager)
             main_window.show()
 
         # Создаем иконку в трее
         from ui.tray_icon import TrayIcon
-        tray_icon = TrayIcon(app, nginx_manager)
+        tray_icon = TrayIcon(app, proxy_manager)
         tray_icon.main_window = main_window
         tray_icon.show()
 
@@ -123,9 +123,9 @@ def main():
         def cleanup():
             logger.info("🛑 Завершение работы приложения")
             try:
-                nginx_manager.stop()
+                proxy_manager.stop()
             except Exception as e:
-                logger.error(f"Ошибка при остановке nginx: {e}")
+                logger.error(f"Ошибка при остановке прокси: {e}")
 
             # Освобождаем блокировку приложения
             instance_lock.unlock()

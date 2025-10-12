@@ -5,9 +5,6 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayo
                                QGroupBox, QStatusBar, QMessageBox)
 from PySide6.QtCore import QTimer, QThread, Signal, QObject
 from PySide6.QtGui import QTextCursor, QFont
-from ui.icons import get_icon_manager
-from ui.styles import STYLESHEET
-from ui.colors import COLORS
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +30,14 @@ class LogHandler(logging.Handler):
             print(f"Ошибка в LogHandler: {e}")
 
 
-class NginxManagerThread(QThread):
-    """Поток для управления nginx"""
+class ProxyManagerThread(QThread):
+    """Поток для управления прокси"""
     log_signal = Signal(str)
     status_signal = Signal(dict)
 
-    def __init__(self, nginx_manager):
+    def __init__(self, proxy_manager):
         super().__init__()
-        self.nginx_manager = nginx_manager
+        self.proxy_manager = proxy_manager
         self.action = None
         self.remote_url = ""
 
@@ -50,53 +47,66 @@ class NginxManagerThread(QThread):
             self.remote_url = remote_url
 
     def run(self):
-        if self.action == "start":
-            self.start_nginx()
-        elif self.action == "stop":
-            self.stop_nginx()
-        elif self.action == "restart":
-            self.restart_nginx()
-
-    def start_nginx(self):
         try:
-            success = self.nginx_manager.start(61000, self.remote_url)
-            status = self.nginx_manager.get_status()
+            if self.action == "start":
+                self.start_proxy()
+            elif self.action == "stop":
+                self.stop_proxy()
+            elif self.action == "restart":
+                self.restart_proxy()
+        except Exception as e:
+            self.log_signal.emit(f"❌ Ошибка в потоке: {e}")
+            logger.error(f"Ошибка в ProxyManagerThread: {e}", exc_info=True)
+
+    def start_proxy(self):
+        try:
+            success = self.proxy_manager.start(61000, self.remote_url)
+            status = self.proxy_manager.get_status()
             self.status_signal.emit(status)
             if success:
-                self.log_signal.emit("✅ Nginx успешно запущен")
+                self.log_signal.emit("✅ Прокси успешно запущен")
             else:
-                self.log_signal.emit("❌ Ошибка запуска Nginx")
+                self.log_signal.emit("❌ Ошибка запуска прокси")
         except Exception as e:
-            self.log_signal.emit(f"❌ Ошибка запуска Nginx: {e}")
+            self.log_signal.emit(f"❌ Ошибка запуска прокси: {e}")
+            logger.error(f"Ошибка запуска: {e}", exc_info=True)
 
-    def stop_nginx(self):
+    def stop_proxy(self):
         try:
-            success = self.nginx_manager.stop()
-            status = self.nginx_manager.get_status()
+            success = self.proxy_manager.stop()
+            status = self.proxy_manager.get_status()
             self.status_signal.emit(status)
             if success:
-                self.log_signal.emit("✅ Nginx успешно остановлен")
+                self.log_signal.emit("✅ Прокси успешно остановлен")
             else:
-                self.log_signal.emit("❌ Ошибка остановки Nginx")
+                self.log_signal.emit("❌ Ошибка остановки прокси")
         except Exception as e:
-            self.log_signal.emit(f"❌ Ошибка остановки Nginx: {e}")
+            self.log_signal.emit(f"❌ Ошибка остановки прокси: {e}")
+            logger.error(f"Ошибка остановки: {e}", exc_info=True)
 
-    def restart_nginx(self):
-        self.stop_nginx()
-        self.start_nginx()
+    def restart_proxy(self):
+        try:
+            self.stop_proxy()
+            if self.remote_url:
+                self.start_proxy()
+        except Exception as e:
+            self.log_signal.emit(f"❌ Ошибка перезапуска прокси: {e}")
+            logger.error(f"Ошибка перезапуска: {e}", exc_info=True)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, nginx_manager):
+    def __init__(self, proxy_manager):
         super().__init__()
-        self.nginx_manager = nginx_manager
-        self.nginx_thread = None
+        self.proxy_manager = proxy_manager
+        self.proxy_thread = None
+        self.current_status = {}
 
         self.setup_ui()
 
-        # Устанавливаем стиль
+        # Применяем тему
         self.apply_theme()
 
+        # Загружаем конфиг
         from core.config_manager import get_config
         self.config = get_config()
 
@@ -113,12 +123,17 @@ class MainWindow(QMainWindow):
         self.status_timer.start(5000)
 
     def setup_ui(self):
+        """Настройка пользовательского интерфейса"""
         self.setWindowTitle("Zenzefi Client")
         self.setGeometry(100, 100, 800, 600)
 
         # Устанавливаем иконку окна
-        icon_manager = get_icon_manager()
-        self.setWindowIcon(icon_manager.get_icon("window_img.png"))
+        try:
+            from ui.icons import get_icon_manager
+            icon_manager = get_icon_manager()
+            self.setWindowIcon(icon_manager.get_icon("window_img.png"))
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить иконку окна: {e}")
 
         # Центральный виджет
         central_widget = QWidget()
@@ -139,13 +154,13 @@ class MainWindow(QMainWindow):
 
         # Кнопки управления
         buttons_layout = QHBoxLayout()
-        self.start_btn = QPushButton("Запуск Nginx")
-        self.stop_btn = QPushButton("Остановка Nginx")
+        self.start_btn = QPushButton("Запуск прокси")
+        self.stop_btn = QPushButton("Остановка прокси")
         self.restart_btn = QPushButton("Перезапуск")
 
-        self.start_btn.clicked.connect(self.start_nginx)
-        self.stop_btn.clicked.connect(self.stop_nginx)
-        self.restart_btn.clicked.connect(self.restart_nginx)
+        self.start_btn.clicked.connect(self.start_proxy)
+        self.stop_btn.clicked.connect(self.stop_proxy)
+        self.restart_btn.clicked.connect(self.restart_proxy)
 
         buttons_layout.addWidget(self.start_btn)
         buttons_layout.addWidget(self.stop_btn)
@@ -160,7 +175,7 @@ class MainWindow(QMainWindow):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Courier", 14))
+        self.log_text.setFont(QFont("Courier", 10))
         log_layout.addWidget(self.log_text)
 
         # Кнопки для логов
@@ -195,28 +210,44 @@ class MainWindow(QMainWindow):
         self.log_emitter.log_signal.connect(self.add_log_message)
 
         # Добавляем обработчик в корневой логгер
-        logging.getLogger().addHandler(self.log_handler)
-        logging.getLogger().setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        root_logger.addHandler(self.log_handler)
+
+        if root_logger.level == logging.NOTSET:
+            root_logger.setLevel(logging.INFO)
 
     def add_log_message(self, message):
         """Добавляет сообщение в лог"""
-        self.log_text.append(message)
-        self.log_text.moveCursor(QTextCursor.End)
+        try:
+            self.log_text.append(message)
+            self.log_text.moveCursor(QTextCursor.End)
+        except Exception as e:
+            print(f"Ошибка добавления лога: {e}")
 
     def clear_logs(self):
         """Очищает логи"""
         self.log_text.clear()
+        logger.info("Логи очищены")
 
     def copy_logs(self):
         """Копирует логи в буфер обмена"""
-        clipboard = QApplication.clipboard()
-        clipboard.setText(self.log_text.toPlainText())
-        self.status_bar.showMessage("Логи скопированы в буфер обмена", 3000)
+        try:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(self.log_text.toPlainText())
+            self.status_bar.showMessage("Логи скопированы в буфер обмена", 3000)
+        except Exception as e:
+            logger.error(f"Ошибка копирования логов: {e}")
 
     def load_config(self):
         """Загружает конфигурацию"""
-        remote_url = self.config.get('proxy.remote_url', 'Введите адрес')
-        self.url_input.setText(remote_url)
+        try:
+            remote_url = self.config.get('proxy.remote_url', '')
+            if not remote_url:
+                remote_url = 'https://zenzefi.melxiory.ru'
+            self.url_input.setText(remote_url)
+        except Exception as e:
+            logger.error(f"Ошибка загрузки конфига: {e}")
+            self.url_input.setText('https://zenzefi.melxiory.ru')
 
     def save_config(self):
         """Сохраняет конфигурацию"""
@@ -225,11 +256,12 @@ class MainWindow(QMainWindow):
             if remote_url:
                 self.config.set('proxy.remote_url', remote_url)
                 self.config.save()
+                logger.debug("Конфигурация сохранена")
         except Exception as e:
             logger.error(f"Ошибка сохранения конфига: {e}")
 
-    def start_nginx(self):
-        """Запускает nginx"""
+    def start_proxy(self):
+        """Запускает прокси"""
         remote_url = self.url_input.text().strip()
         if not remote_url:
             QMessageBox.warning(self, "Ошибка", "Введите URL для проксирования")
@@ -240,142 +272,190 @@ class MainWindow(QMainWindow):
             return
 
         self.save_config()
-        self.start_nginx_thread("start", remote_url)
+        self.start_proxy_thread("start", remote_url)
 
-    def stop_nginx(self):
-        """Останавливает nginx"""
-        self.start_nginx_thread("stop")
+    def stop_proxy(self):
+        """Останавливает прокси"""
+        self.start_proxy_thread("stop")
 
-    def restart_nginx(self):
-        """Перезапускает nginx"""
+    def restart_proxy(self):
+        """Перезапускает прокси"""
         remote_url = self.url_input.text().strip()
-        self.save_config()
-        self.start_nginx_thread("restart", remote_url)
-
-    def start_nginx_thread(self, action, remote_url=None):
-        """Запускает поток управления nginx"""
-        if self.nginx_thread and self.nginx_thread.isRunning():
+        if not remote_url:
+            QMessageBox.warning(self, "Ошибка", "Введите URL для проксирования")
             return
 
-        self.nginx_thread = NginxManagerThread(self.nginx_manager)
-        self.nginx_thread.set_action(action, remote_url)
-        self.nginx_thread.log_signal.connect(self.add_log_message)
-        self.nginx_thread.status_signal.connect(self.handle_status_update)
-        self.nginx_thread.finished.connect(self.thread_finished)
-        self.nginx_thread.start()
+        self.save_config()
+        self.start_proxy_thread("restart", remote_url)
 
-        self.update_buttons_state(False)
+    def start_proxy_thread(self, action, remote_url=None):
+        """Запускает поток управления прокси"""
+        if self.proxy_thread and self.proxy_thread.isRunning():
+            logger.warning("Поток уже запущен")
+            return
+
+        try:
+            self.proxy_thread = ProxyManagerThread(self.proxy_manager)
+            self.proxy_thread.set_action(action, remote_url)
+            self.proxy_thread.log_signal.connect(self.add_log_message)
+            self.proxy_thread.status_signal.connect(self.handle_status_update)
+            self.proxy_thread.finished.connect(self.thread_finished)
+            self.proxy_thread.start()
+
+            self.update_buttons_state(False)
+        except Exception as e:
+            logger.error(f"Ошибка запуска потока: {e}", exc_info=True)
+            self.update_buttons_state(True)
 
     def thread_finished(self):
         """Вызывается при завершении потока"""
         self.update_buttons_state(True)
+        self.update_status()
 
     def handle_status_update(self, status):
         """Обрабатывает обновление статуса"""
-        self.current_status = status
-        self.update_status_display()
+        try:
+            self.current_status = status
+            self.update_status_display()
+        except Exception as e:
+            logger.error(f"Ошибка обновления статуса: {e}")
 
     def update_status(self):
         """Обновляет статус"""
-        if not self.nginx_thread or not self.nginx_thread.isRunning():
-            status = self.nginx_manager.get_status()
-            self.handle_status_update(status)
+        try:
+            if not self.proxy_thread or not self.proxy_thread.isRunning():
+                status = self.proxy_manager.get_status()
+                self.handle_status_update(status)
+        except Exception as e:
+            logger.error(f"Ошибка обновления статуса: {e}")
 
     def update_status_display(self):
         """Обновляет отображение статуса"""
-        if hasattr(self, 'current_status'):
+        try:
+            if not self.current_status:
+                return
+
             status = self.current_status
 
-            from ui.theme_manager import get_theme_manager
-            theme_manager = get_theme_manager()
-            colors = theme_manager.get_current_colors()
+            # Получаем цвета темы
+            try:
+                from ui.theme_manager import get_theme_manager
+                theme_manager = get_theme_manager()
+                colors = theme_manager.get_current_colors()
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить тему: {e}")
+                colors = {
+                    'success': '#00D4AA',
+                    'error': '#E4002B',
+                    'header_bg': '#000000'
+                }
 
-            if status['running']:
-                status_text = f"✅ Nginx запущен - https://127.0.0.1:{status['port']} → {status['url']}"
+            if status.get('running', False):
+                status_text = f"✅ Прокси запущен - https://127.0.0.1:{status.get('port', 61000)} → {status.get('url', 'N/A')}"
                 text_color = colors['success']
             else:
-                status_text = "❌ Nginx остановлен"
+                status_text = "❌ Прокси остановлен"
                 text_color = colors['error']
 
             # Улучшенная информация о порте
-            if not status['port_available']:
+            if not status.get('port_available', True):
                 if status.get('port_used_by_us', False):
                     status_text += " | ⚠️ Порт занят нашим приложением"
-                    text_color = "#FFA500"  # Оранжевый
+                    text_color = "#FFA500"
                 elif 'port_message' in status:
                     status_text += f" | {status['port_message']}"
-                    text_color = "#FFA500"  # Оранжевый
+                    text_color = "#FFA500"
 
-            # Используем цвет из текущей темы для статус бара
+            # Обновляем статус бар
             self.status_bar.setStyleSheet(f"color: {text_color}; background-color: {colors['header_bg']};")
             self.status_bar.showMessage(status_text)
 
+        except Exception as e:
+            logger.error(f"Ошибка отображения статуса: {e}")
+            self.status_bar.showMessage("Ошибка статуса")
+
     def update_buttons_state(self, enabled=True):
         """Обновляет состояние кнопок"""
-        self.start_btn.setEnabled(enabled)
-        self.stop_btn.setEnabled(enabled)
-        self.restart_btn.setEnabled(enabled)
-        self.url_input.setEnabled(enabled)
+        try:
+            self.start_btn.setEnabled(enabled)
+            self.stop_btn.setEnabled(enabled)
+            self.restart_btn.setEnabled(enabled)
+            self.url_input.setEnabled(enabled)
 
-        if not enabled:
-            self.start_btn.setText("Запуск...")
-            self.stop_btn.setText("Остановка...")
-        else:
-            self.start_btn.setText("Запуск Nginx")
-            self.stop_btn.setText("Остановка Nginx")
+            if not enabled:
+                self.start_btn.setText("Запуск...")
+                self.stop_btn.setText("Остановка...")
+                self.restart_btn.setText("Перезапуск...")
+            else:
+                self.start_btn.setText("Запуск прокси")
+                self.stop_btn.setText("Остановка прокси")
+                self.restart_btn.setText("Перезапуск")
+        except Exception as e:
+            logger.error(f"Ошибка обновления кнопок: {e}")
 
     def closeEvent(self, event):
         """Обрабатывает закрытие окна"""
-        if hasattr(self, 'nginx_thread') and self.nginx_thread and self.nginx_thread.isRunning():
-            reply = QMessageBox.question(self, 'Подтверждение',
-                                         'Nginx все еще работает. Вы уверены, что хотите выйти?',
-                                         QMessageBox.Yes | QMessageBox.No,
-                                         QMessageBox.No)
+        try:
+            if hasattr(self, 'proxy_thread') and self.proxy_thread and self.proxy_thread.isRunning():
+                reply = QMessageBox.question(
+                    self,
+                    'Подтверждение',
+                    'Прокси все еще работает. Вы уверены, что хотите выйти?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
 
-            if reply == QMessageBox.Yes:
-                event.accept()
+                if reply == QMessageBox.Yes:
+                    # Останавливаем поток
+                    if self.proxy_thread:
+                        self.proxy_thread.wait(3000)
+                    event.accept()
+                else:
+                    event.ignore()
             else:
-                event.ignore()
-        else:
+                event.accept()
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии окна: {e}")
             event.accept()
 
     def apply_theme(self):
         """Применяет текущую тему Mercedes-Benz"""
-        from ui.theme_manager import get_theme_manager
-        theme_manager = get_theme_manager()
+        try:
+            from ui.theme_manager import get_theme_manager
+            theme_manager = get_theme_manager()
 
-        stylesheet = theme_manager.get_stylesheet()
-        colors = theme_manager.get_current_colors()
+            stylesheet = theme_manager.get_stylesheet()
+            colors = theme_manager.get_current_colors()
 
-        # Добавляем стиль для заголовка окна
-        enhanced_stylesheet = stylesheet + f"""
-                    QMainWindow {{
-                        background-color: {colors['primary_bg']};
-                        color: {colors['text_primary']};
-                    }}
-                    QMainWindow::title {{
-                        background-color: {colors['header_bg']};
-                        color: {colors['accent_white']};
-                    }}
-                """
+            # Добавляем стиль для заголовка окна
+            enhanced_stylesheet = stylesheet + f"""
+                QMainWindow {{
+                    background-color: {colors['primary_bg']};
+                    color: {colors['text_primary']};
+                }}
+            """
 
-        self.setStyleSheet(enhanced_stylesheet)
+            self.setStyleSheet(enhanced_stylesheet)
 
-        # Настраиваем QTextEdit для логов (специфичные настройки)
-        log_style = f"""
-            QTextEdit {{
-                background-color: {colors['input_bg']};
-                color: {colors['text_secondary']};
-                border: 1px solid {colors['border_dark']};
-                border-radius: 3px;
-                font-family: 'Courier New';
-                selection-background-color: {colors['button_active']};
-            }}
-        """
-        self.log_text.setStyleSheet(log_style)
+            # Настраиваем QTextEdit для логов
+            log_style = f"""
+                QTextEdit {{
+                    background-color: {colors['input_bg']};
+                    color: {colors['text_secondary']};
+                    border: 1px solid {colors['border_dark']};
+                    border-radius: 3px;
+                    font-family: 'Courier New', monospace;
+                    selection-background-color: {colors['button_active']};
+                }}
+            """
+            self.log_text.setStyleSheet(log_style)
 
-        # Обновляем статус бар
-        self.update_status_display()
+            # Обновляем статус бар если есть статус
+            if self.current_status:
+                self.update_status_display()
 
-        # Принудительное обновление интерфейса
-        self.update()
+            # Принудительное обновление
+            self.update()
+
+        except Exception as e:
+            logger.warning(f"Ошибка применения темы: {e}")
