@@ -14,6 +14,8 @@ import sys
 from collections import OrderedDict
 from typing import Optional, Tuple
 import hashlib
+import gzip
+import zlib
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,22 @@ class ZenzefiProxy:
         # Семафор для ограничения одновременных соединений
         self.connection_semaphore = asyncio.Semaphore(50)
 
+        # Request deduplication - словарь активных запросов
+        self.pending_requests = {}  # {request_key: asyncio.Task}
+
+        # Статистика производительности
+        self.stats = {
+            'total_requests': 0,
+            'total_responses': 0,
+            'active_connections': 0,
+            'compressed_responses': 0,
+            'compression_saved_bytes': 0,
+            'streamed_responses': 0,
+            'errors': 0,
+            'websocket_connections': 0,
+            'deduplicated_requests': 0
+        }
+
     async def initialize(self):
         """Инициализация connection pool"""
         if self.connector is None:
@@ -135,8 +153,55 @@ class ZenzefiProxy:
         cacheable_types = ['image/', 'font/', 'text/css', 'application/javascript']
         return any(ct in content_type.lower() for ct in cacheable_types)
 
+    def _is_compressible(self, content_type: str) -> bool:
+        """Проверка, можно ли сжимать контент"""
+        compressible_types = [
+            'text/', 'application/json', 'application/javascript',
+            'application/xml', 'application/x-javascript'
+        ]
+        return any(ct in content_type.lower() for ct in compressible_types)
+
+    def _compress_content(self, content: bytes, accept_encoding: str) -> tuple[bytes, str]:
+        """Сжимает контент используя gzip или deflate
+
+        Возвращает (сжатый_контент, encoding)
+        """
+        # Не сжимаем если контент слишком маленький (< 1KB)
+        if len(content) < 1024:
+            return content, None
+
+        # Определяем предпочитаемый метод сжатия
+        accept_encoding_lower = accept_encoding.lower()
+
+        # Предпочитаем gzip как наиболее распространенный
+        if 'gzip' in accept_encoding_lower:
+            try:
+                compressed = gzip.compress(content, compresslevel=6)
+                # Проверяем что сжатие дало выгоду
+                if len(compressed) < len(content):
+                    logger.debug(f"🗜️ gzip: {len(content)} → {len(compressed)} bytes ({len(compressed)/len(content)*100:.1f}%)")
+                    return compressed, 'gzip'
+            except Exception as e:
+                logger.warning(f"Ошибка gzip сжатия: {e}")
+
+        # Fallback на deflate
+        elif 'deflate' in accept_encoding_lower:
+            try:
+                compressed = zlib.compress(content, level=6)
+                if len(compressed) < len(content):
+                    logger.debug(f"🗜️ deflate: {len(content)} → {len(compressed)} bytes ({len(compressed)/len(content)*100:.1f}%)")
+                    return compressed, 'deflate'
+            except Exception as e:
+                logger.warning(f"Ошибка deflate сжатия: {e}")
+
+        # Не удалось сжать или сжатие не поддерживается
+        return content, None
+
     async def handle_http(self, request):
         """Обработка HTTP/HTTPS запросов с кэшированием и streaming"""
+        self.stats['total_requests'] += 1
+        self.stats['active_connections'] += 1
+
         try:
             # Проверяем кэш для статических ресурсов
             cache_key = self._get_cache_key(request.path, request.query_string)
@@ -147,6 +212,8 @@ class ZenzefiProxy:
                 if cached:
                     content, headers, status = cached
                     logger.debug(f"✅ Cache HIT: {request.path}")
+                    self.stats['total_responses'] += 1
+                    self.stats['active_connections'] -= 1
                     return web.Response(body=content, status=status, headers=headers)
 
             # Используем семафор для ограничения одновременных соединений
@@ -213,6 +280,7 @@ class ZenzefiProxy:
                     # Streaming для больших файлов (>1MB)
                     if content_length > self._STREAMING_THRESHOLD:
                         logger.debug(f"🌊 Streaming: {request.path} ({content_length} bytes)")
+                        self.stats['streamed_responses'] += 1
 
                         response = web.StreamResponse(
                             status=upstream_response.status,
@@ -224,6 +292,8 @@ class ZenzefiProxy:
                             await response.write(chunk)
 
                         await response.write_eof()
+                        self.stats['total_responses'] += 1
+                        self.stats['active_connections'] -= 1
                         return response
 
                     # Обычная загрузка для небольших файлов
@@ -238,10 +308,30 @@ class ZenzefiProxy:
                         except:
                             pass
 
+                    # Применяем сжатие если клиент поддерживает и контент подходит
+                    original_size = len(content)
+                    accept_encoding = request.headers.get('Accept-Encoding', '')
+                    if accept_encoding and self._is_compressible(content_type):
+                        compressed_content, encoding = self._compress_content(content, accept_encoding)
+                        if encoding:
+                            saved_bytes = original_size - len(compressed_content)
+                            self.stats['compressed_responses'] += 1
+                            self.stats['compression_saved_bytes'] += saved_bytes
+                            content = compressed_content
+                            response_headers['Content-Encoding'] = encoding
+                            response_headers['Content-Length'] = str(len(content))
+
+                    # Добавляем явные keep-alive заголовки
+                    response_headers['Connection'] = 'keep-alive'
+                    response_headers['Keep-Alive'] = 'timeout=60, max=100'
+
                     # Кэшируем статические ресурсы
                     if request.method == 'GET' and self._is_cacheable(request.path, content_type):
                         self.cache.put(cache_key, (content, dict(response_headers), upstream_response.status))
                         logger.debug(f"💾 Cached: {request.path}")
+
+                    self.stats['total_responses'] += 1
+                    self.stats['active_connections'] -= 1
 
                     return web.Response(
                         body=content,
@@ -250,6 +340,8 @@ class ZenzefiProxy:
                     )
 
         except Exception as e:
+            self.stats['errors'] += 1
+            self.stats['active_connections'] -= 1
             logger.error(f"❌ HTTP Error: {e}")
             return web.Response(text=f"Proxy error: {str(e)}", status=500)
 
@@ -376,6 +468,29 @@ class ZenzefiProxy:
     def get_cache_stats(self):
         """Получить статистику кэша"""
         return self.cache.get_stats()
+
+    def get_full_stats(self):
+        """Получить полную статистику прокси"""
+        cache_stats = self.cache.get_stats()
+
+        # Подсчитываем коэффициент сжатия
+        compression_ratio = 0
+        if self.stats['compressed_responses'] > 0:
+            avg_saved = self.stats['compression_saved_bytes'] / self.stats['compressed_responses']
+            compression_ratio = f"{avg_saved:.0f}"
+
+        return {
+            'requests': self.stats['total_requests'],
+            'responses': self.stats['total_responses'],
+            'active': self.stats['active_connections'],
+            'errors': self.stats['errors'],
+            'compressed': self.stats['compressed_responses'],
+            'compression_saved': f"{self.stats['compression_saved_bytes'] / 1024:.1f} KB",
+            'compression_ratio': compression_ratio,
+            'streamed': self.stats['streamed_responses'],
+            'websockets': self.stats['websocket_connections'],
+            'cache': cache_stats
+        }
 
 
 class ProxyManager:
@@ -604,8 +719,15 @@ class ProxyManager:
         # Добавляем статистику кэша
         if self.proxy and self.is_running:
             status['cache_stats'] = self.proxy.get_cache_stats()
+            status['proxy_stats'] = self.proxy.get_full_stats()
 
         return status
+
+    def get_proxy_stats(self):
+        """Получить детальную статистику прокси"""
+        if self.proxy and self.is_running:
+            return self.proxy.get_full_stats()
+        return None
 
     def is_port_in_use_by_us(self, port: int) -> bool:
         """Проверяет, занят ли порт нашим приложением"""
