@@ -125,9 +125,6 @@ class MainWindow(QMainWindow):
 
         self.setup_ui()
 
-        # Применяем тему
-        self.apply_theme()
-
         # Загружаем конфиг
         from core.config_manager import get_config
         self.config = get_config()
@@ -143,6 +140,9 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_status)
         self.status_timer.start(5000)
+
+        # Применяем тему ПОСЛЕ создания всех элементов (отложенная загрузка)
+        QTimer.singleShot(0, self.apply_theme)
 
     def setup_ui(self):
         """Настройка пользовательского интерфейса"""

@@ -83,6 +83,9 @@ def main():
         return 1
 
     app = None
+    splash = None
+    startup_thread = None
+
     try:
         # Создаем приложение
         app = QApplication(sys.argv)
@@ -95,31 +98,101 @@ def main():
 
         logger.info("🚀 Запуск Zenzefi Client")
 
-        # Инициализация менеджеров
-        from core.proxy_manager import get_proxy_manager
-        from core.certificate_manager import CertificateManager
+        # Показываем splash screen
+        from ui.splash_screen import SplashScreen
+        splash = SplashScreen()
+        splash.show()
+        app.processEvents()  # Обновляем GUI
 
-        # Проверяем сертификаты
-        cert_manager = CertificateManager()
-        if not cert_manager.ensure_certificates_exist():
-            logger.error("❌ Не удалось создать сертификаты")
+        # Запускаем асинхронную инициализацию
+        from core.startup_manager import StartupThread
+        startup_thread = StartupThread()
+
+        # Контейнер для результатов
+        init_results = {'success': False, 'error': None, 'objects': None}
+
+        def on_progress(message, progress):
+            """Обработчик прогресса инициализации"""
+            splash.showMessage(message, progress)
+            app.processEvents()
+
+        def on_finished(success, error_message):
+            """Обработчик завершения инициализации"""
+            logger.info(f"📥 Получен сигнал завершения: success={success}, error='{error_message}'")
+            init_results['success'] = success
+            init_results['error'] = error_message
+            if success:
+                init_results['objects'] = startup_thread.get_results()
+                logger.info(f"📦 Результаты инициализации: {init_results['objects']}")
+
+        startup_thread.progress_signal.connect(on_progress)
+        startup_thread.finished_signal.connect(on_finished)
+        startup_thread.start()
+
+        # Ждем завершения инициализации с обработкой событий Qt
+        logger.info("⏳ Ожидание завершения потока инициализации...")
+        while startup_thread.isRunning():
+            app.processEvents()  # Обрабатываем сигналы Qt
+            startup_thread.wait(10)  # Ждем 10ms
+
+        # Еще раз обрабатываем события чтобы все сигналы дошли
+        app.processEvents()
+        logger.info(f"✅ Поток завершен. Результаты: success={init_results['success']}, error={init_results['error']}, objects={init_results['objects']}")
+
+        # Проверяем результат
+        if not init_results['success']:
+            if splash:
+                splash.close()
+            error_msg = init_results['error'] or "Неизвестная ошибка инициализации"
+            logger.error(f"❌ {error_msg}")
             QMessageBox.critical(
                 None,
-                "Ошибка",
-                "Не удалось создать SSL сертификаты. Приложение будет закрыто."
+                "Ошибка инициализации",
+                error_msg
             )
             instance_lock.unlock()
             return 1
 
-        # Создаем менеджер прокси
-        proxy_manager = get_proxy_manager()
+        # Получаем инициализированные объекты
+        if not init_results['objects']:
+            if splash:
+                splash.close()
+            error_msg = "Не удалось инициализировать компоненты приложения"
+            logger.error(f"❌ {error_msg}")
+            QMessageBox.critical(
+                None,
+                "Ошибка инициализации",
+                error_msg
+            )
+            instance_lock.unlock()
+            return 1
 
-        # Создаем и показываем главное окно или трей (lazy loading)
+        proxy_manager = init_results['objects'].get('proxy_manager')
+        if not proxy_manager:
+            if splash:
+                splash.close()
+            error_msg = "Не удалось инициализировать ProxyManager"
+            logger.error(f"❌ {error_msg}")
+            QMessageBox.critical(
+                None,
+                "Ошибка инициализации",
+                error_msg
+            )
+            instance_lock.unlock()
+            return 1
+
+        # Загружаем конфигурацию
+        splash.showMessage("Загрузка конфигурации...", 90)
+        app.processEvents()
+
         from core.config_manager import get_config
         config = get_config()
         start_minimized = config.get('application.start_minimized', False)
 
-        # Создаем иконку в трее сразу
+        # Создаем иконку в трее
+        splash.showMessage("Создание системного трея...", 95)
+        app.processEvents()
+
         from ui.tray_icon import TrayIcon
         tray_icon = TrayIcon(app, proxy_manager)
         tray_icon.show()
@@ -127,12 +200,21 @@ def main():
         # MainWindow создается только если не запущен в свернутом виде
         # или при клике на трее (lazy loading)
         if not start_minimized:
+            splash.showMessage("Загрузка главного окна...", 98)
+            app.processEvents()
+
             from ui.main_window import MainWindow
             main_window = MainWindow(proxy_manager)
             main_window.show()
             tray_icon.main_window = main_window
         else:
             logger.info("🚀 Запуск в свернутом режиме, окно будет создано по требованию")
+
+        # Закрываем splash screen
+        splash.showMessage("Готово!", 100)
+        app.processEvents()
+
+        splash.finish(tray_icon if start_minimized else main_window)
 
         logger.info("✅ Приложение запущено успешно")
 
