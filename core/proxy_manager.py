@@ -48,7 +48,7 @@ class ZenzefiProxy:
         self.connection_semaphore = asyncio.Semaphore(50)
 
         # Request deduplication - словарь активных запросов
-        self.pending_requests = {}  # {request_key: asyncio.Task}
+        self.pending_requests = {}  # {request_key: (asyncio.Event, result_holder)}
 
         # Статистика производительности
         self.stats = {
@@ -64,16 +64,17 @@ class ZenzefiProxy:
         }
 
     async def initialize(self):
-        """Инициализация connection pool"""
+        """Инициализация connection pool с оптимизацией для keep-alive"""
         if self.connector is None:
-            # Настройка connection pooling
+            # Настройка connection pooling с максимальной оптимизацией keep-alive
             self.connector = aiohttp.TCPConnector(
                 ssl=False,
                 limit=100,  # Максимум 100 одновременных соединений
-                limit_per_host=30,  # Максимум 30 на хост
+                limit_per_host=30,  # Максимум 30 на хост (оптимально для HTTP/1.1)
                 ttl_dns_cache=300,  # DNS кэш на 5 минут
                 keepalive_timeout=60,  # Keep-alive 60 секунд
-                enable_cleanup_closed=True
+                force_close=False,  # НЕ закрывать соединения после каждого запроса (критично!)
+                enable_cleanup_closed=True  # Автоочистка закрытых соединений
             )
 
         if self.session is None:
@@ -154,6 +155,41 @@ class ZenzefiProxy:
                     self.stats['total_responses'] += 1
                     self.stats['active_connections'] -= 1
                     return web.Response(body=content, status=status, headers=headers)
+
+                # Request Deduplication: проверяем, есть ли уже активный запрос
+                if cache_key in self.pending_requests:
+                    logger.debug(f"🔄 Request deduplication: waiting for {request.path}")
+                    self.stats['deduplicated_requests'] += 1
+                    self.stats['active_connections'] -= 1
+
+                    # Ждём результат активного запроса
+                    event, result_holder = self.pending_requests[cache_key]
+                    await event.wait()  # Ждём пока первый запрос завершится
+
+                    self.stats['total_responses'] += 1
+
+                    # Проверяем результат и создаём НОВЫЙ Response объект
+                    if 'body' in result_holder:
+                        # Создаём новый Response с переиспользованием body
+                        return web.Response(
+                            body=result_holder['body'],
+                            status=result_holder['status'],
+                            headers=result_holder['headers']
+                        )
+                    elif 'error' in result_holder:
+                        # Первый запрос упал, делаем свой
+                        logger.debug(f"⚠️ Original request failed: {result_holder['error']}")
+                        # Продолжаем выполнение своего запроса
+                    else:
+                        # Странная ситуация, делаем свой запрос
+                        logger.warning("⚠️ No result in holder, making new request")
+
+            # Создаём Event для дедупликации (только для GET)
+            dedup_event = None
+            result_holder = {}
+            if request.method == 'GET' and cache_key not in self.pending_requests:
+                dedup_event = asyncio.Event()
+                self.pending_requests[cache_key] = (dedup_event, result_holder)
 
             # Используем семафор для ограничения одновременных соединений
             async with self.connection_semaphore:
@@ -272,6 +308,16 @@ class ZenzefiProxy:
                     self.stats['total_responses'] += 1
                     self.stats['active_connections'] -= 1
 
+                    # Сохраняем данные для дедупликации ПЕРЕД созданием Response
+                    if dedup_event:
+                        result_holder['body'] = content
+                        result_holder['status'] = upstream_response.status
+                        result_holder['headers'] = dict(response_headers)
+                        dedup_event.set()  # Уведомляем ждущие запросы
+                        # Очищаем через небольшую задержку
+                        asyncio.create_task(self._cleanup_pending_request(cache_key))
+
+                    # Создаём Response для текущего запроса
                     return web.Response(
                         body=content,
                         status=upstream_response.status,
@@ -282,7 +328,21 @@ class ZenzefiProxy:
             self.stats['errors'] += 1
             self.stats['active_connections'] -= 1
             logger.error(f"❌ HTTP Error: {e}")
+
+            # Сохраняем ошибку для дедупликации
+            if 'dedup_event' in locals() and dedup_event:
+                result_holder['error'] = str(e)
+                dedup_event.set()
+                asyncio.create_task(self._cleanup_pending_request(cache_key))
+
             return web.Response(text=f"Proxy error: {str(e)}", status=500)
+
+    async def _cleanup_pending_request(self, cache_key: str, delay: float = 0.1):
+        """Очистка завершённого запроса из pending_requests"""
+        await asyncio.sleep(delay)
+        if cache_key in self.pending_requests:
+            del self.pending_requests[cache_key]
+            logger.debug(f"🧹 Cleaned up pending request: {cache_key[:16]}...")
 
     async def handle_websocket(self, request):
         """Обработка WebSocket соединений с ограничением"""
@@ -389,6 +449,7 @@ class ZenzefiProxy:
             'compression_ratio': compression_ratio,
             'streamed': self.stats['streamed_responses'],
             'websockets': self.stats['websocket_connections'],
+            'deduplicated': self.stats['deduplicated_requests'],
             'cache': cache_stats
         }
 
