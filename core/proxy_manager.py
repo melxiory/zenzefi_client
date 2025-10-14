@@ -1,7 +1,6 @@
 # proxy_manager.py
 import asyncio
 import ssl
-import re
 import logging
 import time
 import threading
@@ -10,70 +9,19 @@ import aiohttp
 from utils.process_manager import get_process_manager
 from utils.port_utils import check_port_availability, get_process_using_port
 from core.config_manager import get_app_data_dir
+from core.proxy import CacheManager, ContentRewriter
 import sys
-from collections import OrderedDict
-from typing import Optional, Tuple
-import hashlib
 import gzip
 import zlib
 
 logger = logging.getLogger(__name__)
 
 
-class LRUCache:
-    """Простой LRU кэш для статических ресурсов"""
-    def __init__(self, maxsize=100):
-        self.cache = OrderedDict()
-        self.maxsize = maxsize
-        self.hits = 0
-        self.misses = 0
-
-    def get(self, key: str) -> Optional[Tuple[bytes, dict, int]]:
-        """Получить элемент из кэша"""
-        if key in self.cache:
-            self.hits += 1
-            # Перемещаем в конец (most recently used)
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        self.misses += 1
-        return None
-
-    def put(self, key: str, value: Tuple[bytes, dict, int]):
-        """Добавить элемент в кэш"""
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.maxsize:
-            # Удаляем самый старый элемент
-            self.cache.popitem(last=False)
-
-    def clear(self):
-        """Очистить кэш"""
-        self.cache.clear()
-        self.hits = 0
-        self.misses = 0
-
-    def get_stats(self):
-        """Получить статистику кэша"""
-        total = self.hits + self.misses
-        hit_rate = (self.hits / total * 100) if total > 0 else 0
-        return {
-            'size': len(self.cache),
-            'maxsize': self.maxsize,
-            'hits': self.hits,
-            'misses': self.misses,
-            'hit_rate': f"{hit_rate:.1f}%"
-        }
+# Алиас для обратной совместимости
+LRUCache = CacheManager
 
 
 class ZenzefiProxy:
-    # Предкомпилированные регулярные выражения
-    _HTML_ATTR_PATTERN = re.compile(r'(href|src|action)=["\'](/[^"\']*)["\']')
-    _CSS_URL_PATTERN = re.compile(r'url\(["\']?(/[^)"\']*)["\']?\)')
-
-    # Статические расширения для кэширования
-    _CACHEABLE_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2', '.ttf', '.ico', '.webp'}
-
     # Размер для streaming (1MB)
     _STREAMING_THRESHOLD = 1024 * 1024
 
@@ -84,6 +32,13 @@ class ZenzefiProxy:
 
         # Кэш для статических ресурсов
         self.cache = LRUCache(maxsize=100)
+
+        # ContentRewriter для перезаписи URL
+        self.content_rewriter = ContentRewriter(
+            upstream_url=self.upstream_url,
+            local_url=self.local_url,
+            cache_manager=self.cache
+        )
 
         # Connection pool для переиспользования соединений
         self.connector = None
@@ -136,22 +91,6 @@ class ZenzefiProxy:
             await self.connector.close()
             self.connector = None
 
-    def _get_cache_key(self, path: str, query: str = "") -> str:
-        """Генерация ключа кэша"""
-        full_path = f"{path}?{query}" if query else path
-        return hashlib.md5(full_path.encode()).hexdigest()
-
-    def _is_cacheable(self, path: str, content_type: str) -> bool:
-        """Проверка, можно ли кэшировать ресурс"""
-        # Проверяем расширение файла
-        path_lower = path.lower()
-        for ext in self._CACHEABLE_EXTENSIONS:
-            if ext in path_lower:
-                return True
-
-        # Проверяем content-type
-        cacheable_types = ['image/', 'font/', 'text/css', 'application/javascript']
-        return any(ct in content_type.lower() for ct in cacheable_types)
 
     def _is_compressible(self, content_type: str) -> bool:
         """Проверка, можно ли сжимать контент"""
@@ -204,7 +143,7 @@ class ZenzefiProxy:
 
         try:
             # Проверяем кэш для статических ресурсов
-            cache_key = self._get_cache_key(request.path, request.query_string)
+            cache_key = self.cache.generate_key(request.path, request.query_string)
 
             # Пытаемся получить из кэша (только для GET запросов)
             if request.method == 'GET':
@@ -303,7 +242,7 @@ class ZenzefiProxy:
                     if any(x in content_type for x in ['text/', 'javascript', 'json']):
                         try:
                             content_str = content.decode('utf-8')
-                            content_str = self.fix_content(content_str, content_type)
+                            content_str = self.content_rewriter.rewrite(content_str, content_type)
                             content = content_str.encode('utf-8')
                         except:
                             pass
@@ -326,7 +265,7 @@ class ZenzefiProxy:
                     response_headers['Keep-Alive'] = 'timeout=60, max=100'
 
                     # Кэшируем статические ресурсы
-                    if request.method == 'GET' and self._is_cacheable(request.path, content_type):
+                    if request.method == 'GET' and self.cache.is_cacheable(request.path, content_type):
                         self.cache.put(cache_key, (content, dict(response_headers), upstream_response.status))
                         logger.debug(f"💾 Cached: {request.path}")
 
@@ -418,45 +357,6 @@ class ZenzefiProxy:
                 await ws_local.close()
 
         return ws_local
-
-    def fix_content(self, content, content_type):
-        """Исправляет контент для работы через прокси (с оптимизированными regex и кэшированием)"""
-        # Создаем ключ кэша на основе хеша контента и типа
-        # Для небольших файлов (<10KB) используем полный хеш, для больших - первые 1KB
-        if len(content) < 10240:
-            cache_key = hashlib.md5(f"{content}{content_type}".encode()).hexdigest()
-        else:
-            cache_key = hashlib.md5(f"{content[:1024]}{len(content)}{content_type}".encode()).hexdigest()
-
-        # Проверяем кэш (используем тот же LRU кэш)
-        cached_result = self.cache.get(f"fix_{cache_key}")
-        if cached_result:
-            # Возвращаем кэшированный результат
-            return cached_result[0].decode('utf-8')
-
-        # Простые замены строк
-        content = content.replace(self.upstream_url, self.local_url)
-        content = content.replace('//zenzefi.melxiory.ru', '//127.0.0.1:61000')
-        content = content.replace('wss://zenzefi.melxiory.ru', 'wss://127.0.0.1:61000')
-        content = content.replace('ws://zenzefi.melxiory.ru', 'wss://127.0.0.1:61000')
-
-        # Regex замены с предкомпилированными паттернами
-        if 'text/html' in content_type:
-            content = self._HTML_ATTR_PATTERN.sub(
-                r'\1="https://127.0.0.1:61000\2"',
-                content
-            )
-        elif 'text/css' in content_type:
-            content = self._CSS_URL_PATTERN.sub(
-                r'url(https://127.0.0.1:61000\1)',
-                content
-            )
-
-        # Кэшируем результат (только для небольших файлов чтобы не перегружать память)
-        if len(content) < 102400:  # < 100KB
-            self.cache.put(f"fix_{cache_key}", (content.encode('utf-8'), {}, 200))
-
-        return content
 
     async def router(self, request):
         """Маршрутизация между HTTP и WebSocket"""
@@ -623,6 +523,9 @@ class ProxyManager:
             self.proxy = ZenzefiProxy()
             self.proxy.upstream_url = self.remote_url
             self.proxy.local_url = f"https://127.0.0.1:{self.local_port}"
+
+            # Обновляем URL в ContentRewriter
+            self.proxy.content_rewriter.set_urls(self.remote_url, self.proxy.local_url)
 
             # Инициализируем connection pool
             await self.proxy.initialize()
