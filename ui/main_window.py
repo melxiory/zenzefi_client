@@ -1,5 +1,6 @@
 # ui/main_window.py
 import logging
+import threading
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                                QWidget, QPushButton, QTextEdit, QLineEdit, QLabel,
                                QGroupBox, QStatusBar, QMessageBox)
@@ -15,19 +16,40 @@ class LogEmitter(QObject):
 
 
 class LogHandler(logging.Handler):
-    """Кастомный обработчик логов для вывода в GUI"""
+    """Кастомный обработчик логов для вывода в GUI с debouncing"""
 
     def __init__(self, log_emitter):
         super().__init__()
         self.log_emitter = log_emitter
         self.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.log_buffer = []
+        self.buffer_lock = threading.Lock()
+        self.flush_timer = None
 
     def emit(self, record):
         try:
             msg = self.format(record)
-            self.log_emitter.log_signal.emit(msg)
+            with self.buffer_lock:
+                self.log_buffer.append(msg)
+                # Если таймер не запущен, запускаем его
+                if self.flush_timer is None:
+                    self.flush_timer = threading.Timer(0.2, self.flush_buffer)
+                    self.flush_timer.start()
         except Exception as e:
             print(f"Ошибка в LogHandler: {e}")
+
+    def flush_buffer(self):
+        """Отправляет накопленные логи пакетом"""
+        try:
+            with self.buffer_lock:
+                if self.log_buffer:
+                    # Отправляем все накопленные сообщения одним пакетом
+                    combined_msg = '\n'.join(self.log_buffer)
+                    self.log_emitter.log_signal.emit(combined_msg)
+                    self.log_buffer.clear()
+                self.flush_timer = None
+        except Exception as e:
+            print(f"Ошибка при flush логов: {e}")
 
 
 class ProxyManagerThread(QThread):

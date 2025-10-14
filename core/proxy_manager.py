@@ -5,60 +5,184 @@ import re
 import logging
 import time
 import threading
-from pathlib import Path
 from aiohttp import web, ClientSession, WSMsgType
 import aiohttp
 from utils.process_manager import get_process_manager
 from utils.port_utils import check_port_availability, get_process_using_port
 from core.config_manager import get_app_data_dir
 import sys
+from collections import OrderedDict
+from typing import Optional, Tuple
+import hashlib
 
 logger = logging.getLogger(__name__)
 
 
+class LRUCache:
+    """Простой LRU кэш для статических ресурсов"""
+    def __init__(self, maxsize=100):
+        self.cache = OrderedDict()
+        self.maxsize = maxsize
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> Optional[Tuple[bytes, dict, int]]:
+        """Получить элемент из кэша"""
+        if key in self.cache:
+            self.hits += 1
+            # Перемещаем в конец (most recently used)
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        self.misses += 1
+        return None
+
+    def put(self, key: str, value: Tuple[bytes, dict, int]):
+        """Добавить элемент в кэш"""
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+        if len(self.cache) > self.maxsize:
+            # Удаляем самый старый элемент
+            self.cache.popitem(last=False)
+
+    def clear(self):
+        """Очистить кэш"""
+        self.cache.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def get_stats(self):
+        """Получить статистику кэша"""
+        total = self.hits + self.misses
+        hit_rate = (self.hits / total * 100) if total > 0 else 0
+        return {
+            'size': len(self.cache),
+            'maxsize': self.maxsize,
+            'hits': self.hits,
+            'misses': self.misses,
+            'hit_rate': f"{hit_rate:.1f}%"
+        }
+
+
 class ZenzefiProxy:
+    # Предкомпилированные регулярные выражения
+    _HTML_ATTR_PATTERN = re.compile(r'(href|src|action)=["\'](/[^"\']*)["\']')
+    _CSS_URL_PATTERN = re.compile(r'url\(["\']?(/[^)"\']*)["\']?\)')
+
+    # Статические расширения для кэширования
+    _CACHEABLE_EXTENSIONS = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2', '.ttf', '.ico', '.webp'}
+
+    # Размер для streaming (1MB)
+    _STREAMING_THRESHOLD = 1024 * 1024
+
     def __init__(self):
         self.upstream_url = "https://zenzefi.melxiory.ru"
         self.local_url = "https://127.0.0.1:61000"
         self.ssl_context = None
 
+        # Кэш для статических ресурсов
+        self.cache = LRUCache(maxsize=100)
+
+        # Connection pool для переиспользования соединений
+        self.connector = None
+        self.session = None
+
+        # Семафор для ограничения одновременных соединений
+        self.connection_semaphore = asyncio.Semaphore(50)
+
+    async def initialize(self):
+        """Инициализация connection pool"""
+        if self.connector is None:
+            # Настройка connection pooling
+            self.connector = aiohttp.TCPConnector(
+                ssl=False,
+                limit=100,  # Максимум 100 одновременных соединений
+                limit_per_host=30,  # Максимум 30 на хост
+                ttl_dns_cache=300,  # DNS кэш на 5 минут
+                keepalive_timeout=60,  # Keep-alive 60 секунд
+                enable_cleanup_closed=True
+            )
+
+        if self.session is None:
+            self.session = ClientSession(
+                connector=self.connector,
+                timeout=aiohttp.ClientTimeout(total=30, connect=10)
+            )
+
+    async def cleanup(self):
+        """Очистка ресурсов"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+        if self.connector:
+            await self.connector.close()
+            self.connector = None
+
+    def _get_cache_key(self, path: str, query: str = "") -> str:
+        """Генерация ключа кэша"""
+        full_path = f"{path}?{query}" if query else path
+        return hashlib.md5(full_path.encode()).hexdigest()
+
+    def _is_cacheable(self, path: str, content_type: str) -> bool:
+        """Проверка, можно ли кэшировать ресурс"""
+        # Проверяем расширение файла
+        path_lower = path.lower()
+        for ext in self._CACHEABLE_EXTENSIONS:
+            if ext in path_lower:
+                return True
+
+        # Проверяем content-type
+        cacheable_types = ['image/', 'font/', 'text/css', 'application/javascript']
+        return any(ct in content_type.lower() for ct in cacheable_types)
+
     async def handle_http(self, request):
-        """Обработка HTTP/HTTPS запросов"""
+        """Обработка HTTP/HTTPS запросов с кэшированием и streaming"""
         try:
-            body = await request.read()
+            # Проверяем кэш для статических ресурсов
+            cache_key = self._get_cache_key(request.path, request.query_string)
 
-            # Подготовка заголовков
-            headers = {}
-            for key, value in request.headers.items():
-                key_lower = key.lower()
-                if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
-                    headers[key] = value
+            # Пытаемся получить из кэша (только для GET запросов)
+            if request.method == 'GET':
+                cached = self.cache.get(cache_key)
+                if cached:
+                    content, headers, status = cached
+                    logger.debug(f"✅ Cache HIT: {request.path}")
+                    return web.Response(body=content, status=status, headers=headers)
 
-            header_host = self.upstream_url.replace('https://', '')
-            headers.update({
-                "Host": f"{header_host}",
-                "X-Real-IP": request.remote,
-                "X-Forwarded-For": request.remote,
-                "X-Forwarded-Proto": "https"
-            })
+            # Используем семафор для ограничения одновременных соединений
+            async with self.connection_semaphore:
+                body = await request.read()
 
-            upstream_url = f"{self.upstream_url}{request.path_qs}"
+                # Подготовка заголовков
+                headers = {}
+                for key, value in request.headers.items():
+                    key_lower = key.lower()
+                    if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
+                        headers[key] = value
 
-            cookie_jar = aiohttp.CookieJar()
-            for name, value in request.cookies.items():
-                cookie_jar.update_cookies({name: value})
+                header_host = self.upstream_url.replace('https://', '')
+                headers.update({
+                    "Host": f"{header_host}",
+                    "X-Real-IP": request.remote,
+                    "X-Forwarded-For": request.remote,
+                    "X-Forwarded-Proto": "https"
+                })
 
-            async with ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=False),
-                    cookie_jar=cookie_jar
-            ) as session:
-                async with session.request(
+                upstream_url = f"{self.upstream_url}{request.path_qs}"
+
+                cookie_jar = aiohttp.CookieJar()
+                for name, value in request.cookies.items():
+                    cookie_jar.update_cookies({name: value})
+
+                # Используем переиспользуемую сессию
+                await self.initialize()
+
+                async with self.session.request(
                         method=request.method,
                         url=upstream_url,
                         headers=headers,
                         data=body,
-                        allow_redirects=False,
-                        timeout=aiohttp.ClientTimeout(total=30)
+                        allow_redirects=False
                 ) as upstream_response:
 
                     response_headers = {}
@@ -83,9 +207,29 @@ class ZenzefiProxy:
                         'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With'
                     })
 
-                    content = await upstream_response.read()
                     content_type = upstream_response.headers.get('content-type', '').lower()
+                    content_length = int(upstream_response.headers.get('content-length', 0))
 
+                    # Streaming для больших файлов (>1MB)
+                    if content_length > self._STREAMING_THRESHOLD:
+                        logger.debug(f"🌊 Streaming: {request.path} ({content_length} bytes)")
+
+                        response = web.StreamResponse(
+                            status=upstream_response.status,
+                            headers=response_headers
+                        )
+                        await response.prepare(request)
+
+                        async for chunk in upstream_response.content.iter_chunked(8192):
+                            await response.write(chunk)
+
+                        await response.write_eof()
+                        return response
+
+                    # Обычная загрузка для небольших файлов
+                    content = await upstream_response.read()
+
+                    # Обработка текстового контента
                     if any(x in content_type for x in ['text/', 'javascript', 'json']):
                         try:
                             content_str = content.decode('utf-8')
@@ -93,6 +237,11 @@ class ZenzefiProxy:
                             content = content_str.encode('utf-8')
                         except:
                             pass
+
+                    # Кэшируем статические ресурсы
+                    if request.method == 'GET' and self._is_cacheable(request.path, content_type):
+                        self.cache.put(cache_key, (content, dict(response_headers), upstream_response.status))
+                        logger.debug(f"💾 Cached: {request.path}")
 
                     return web.Response(
                         body=content,
@@ -105,43 +254,43 @@ class ZenzefiProxy:
             return web.Response(text=f"Proxy error: {str(e)}", status=500)
 
     async def handle_websocket(self, request):
-        """Обработка WebSocket соединений"""
-        ws_local = web.WebSocketResponse()
+        """Обработка WebSocket соединений с ограничением"""
+        ws_local = web.WebSocketResponse(max_msg_size=10 * 1024 * 1024)  # 10MB лимит
         await ws_local.prepare(request)
 
         logger.debug(f"🔌 WebSocket: {request.path}")
 
         try:
-            upstream_ws_url = f"wss://zenzefi.melxiory.ru{request.path_qs}"
+            async with self.connection_semaphore:
+                upstream_ws_url = f"wss://zenzefi.melxiory.ru{request.path_qs}"
 
-            headers = {
-                "Host": "zenzefi.melxiory.ru",
-                "Origin": self.upstream_url,
-                "X-Real-IP": request.remote,
-                "X-Forwarded-For": request.remote
-            }
+                headers = {
+                    "Host": "zenzefi.melxiory.ru",
+                    "Origin": self.upstream_url,
+                    "X-Real-IP": request.remote,
+                    "X-Forwarded-For": request.remote
+                }
 
-            if 'Cookie' in request.headers:
-                headers['Cookie'] = request.headers['Cookie']
-            if 'Authorization' in request.headers:
-                headers['Authorization'] = request.headers['Authorization']
+                if 'Cookie' in request.headers:
+                    headers['Cookie'] = request.headers['Cookie']
+                if 'Authorization' in request.headers:
+                    headers['Authorization'] = request.headers['Authorization']
 
-            for key in ['User-Agent', 'Accept', 'Accept-Language', 'Sec-WebSocket-Protocol']:
-                if key in request.headers:
-                    headers[key] = request.headers[key]
+                for key in ['User-Agent', 'Accept', 'Accept-Language', 'Sec-WebSocket-Protocol']:
+                    if key in request.headers:
+                        headers[key] = request.headers[key]
 
-            cookie_jar = aiohttp.CookieJar()
-            for name, value in request.cookies.items():
-                cookie_jar.update_cookies({name: value})
+                cookie_jar = aiohttp.CookieJar()
+                for name, value in request.cookies.items():
+                    cookie_jar.update_cookies({name: value})
 
-            async with ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=False),
-                    cookie_jar=cookie_jar
-            ) as session:
-                async with session.ws_connect(
+                await self.initialize()
+
+                async with self.session.ws_connect(
                         upstream_ws_url,
                         headers=headers,
-                        ssl=False
+                        ssl=False,
+                        max_msg_size=10 * 1024 * 1024
                 ) as ws_upstream:
 
                     async def forward_to_upstream():
@@ -179,25 +328,41 @@ class ZenzefiProxy:
         return ws_local
 
     def fix_content(self, content, content_type):
-        """Исправляет контент для работы через прокси"""
+        """Исправляет контент для работы через прокси (с оптимизированными regex и кэшированием)"""
+        # Создаем ключ кэша на основе хеша контента и типа
+        # Для небольших файлов (<10KB) используем полный хеш, для больших - первые 1KB
+        if len(content) < 10240:
+            cache_key = hashlib.md5(f"{content}{content_type}".encode()).hexdigest()
+        else:
+            cache_key = hashlib.md5(f"{content[:1024]}{len(content)}{content_type}".encode()).hexdigest()
+
+        # Проверяем кэш (используем тот же LRU кэш)
+        cached_result = self.cache.get(f"fix_{cache_key}")
+        if cached_result:
+            # Возвращаем кэшированный результат
+            return cached_result[0].decode('utf-8')
+
+        # Простые замены строк
         content = content.replace(self.upstream_url, self.local_url)
         content = content.replace('//zenzefi.melxiory.ru', '//127.0.0.1:61000')
-
         content = content.replace('wss://zenzefi.melxiory.ru', 'wss://127.0.0.1:61000')
         content = content.replace('ws://zenzefi.melxiory.ru', 'wss://127.0.0.1:61000')
 
+        # Regex замены с предкомпилированными паттернами
         if 'text/html' in content_type:
-            content = re.sub(
-                r'(href|src|action)=["\'](/[^"\']*)["\']',
+            content = self._HTML_ATTR_PATTERN.sub(
                 r'\1="https://127.0.0.1:61000\2"',
                 content
             )
         elif 'text/css' in content_type:
-            content = re.sub(
-                r'url\(["\']?(/[^)"\']*)["\']?\)',
+            content = self._CSS_URL_PATTERN.sub(
                 r'url(https://127.0.0.1:61000\1)',
                 content
             )
+
+        # Кэшируем результат (только для небольших файлов чтобы не перегружать память)
+        if len(content) < 102400:  # < 100KB
+            self.cache.put(f"fix_{cache_key}", (content.encode('utf-8'), {}, 200))
 
         return content
 
@@ -207,6 +372,10 @@ class ZenzefiProxy:
             return await self.handle_websocket(request)
         else:
             return await self.handle_http(request)
+
+    def get_cache_stats(self):
+        """Получить статистику кэша"""
+        return self.cache.get_stats()
 
 
 class ProxyManager:
@@ -340,6 +509,9 @@ class ProxyManager:
             self.proxy.upstream_url = self.remote_url
             self.proxy.local_url = f"https://127.0.0.1:{self.local_port}"
 
+            # Инициализируем connection pool
+            await self.proxy.initialize()
+
             # Создаем приложение
             app = web.Application()
             app.router.add_route('*', '/{path:.*}', self.proxy.router)
@@ -359,6 +531,7 @@ class ProxyManager:
             await self.site.start()
             self.is_running = True
             logger.info(f"✅ Сервер успешно запущен на порту {self.local_port}")
+            logger.info(f"📊 Connection pool: лимит={self.proxy.connector.limit}, per_host={self.proxy.connector.limit_per_host}")
 
         except Exception as e:
             logger.error(f"❌ Ошибка запуска сервера: {e}")
@@ -384,6 +557,11 @@ class ProxyManager:
             if self.thread and self.thread.is_alive():
                 self.thread.join(timeout=5)
 
+            # Логируем статистику кэша перед остановкой
+            if self.proxy:
+                stats = self.proxy.get_cache_stats()
+                logger.info(f"📊 Статистика кэша: {stats}")
+
             logger.info("✅ Прокси сервер остановлен")
             return True
 
@@ -398,6 +576,8 @@ class ProxyManager:
                 await self.site.stop()
             if self.runner:
                 await self.runner.cleanup()
+            if self.proxy:
+                await self.proxy.cleanup()
             logger.debug("✅ Сервер успешно остановлен")
         except Exception as e:
             logger.error(f"❌ Ошибка при остановке сервера: {e}")
@@ -420,6 +600,10 @@ class ProxyManager:
             status['port_message'] = port_message
         if port_used_by_us:
             status['port_message'] = "Порт занят нашим приложением (возможно старый процесс)"
+
+        # Добавляем статистику кэша
+        if self.proxy and self.is_running:
+            status['cache_stats'] = self.proxy.get_cache_stats()
 
         return status
 

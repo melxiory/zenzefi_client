@@ -6,21 +6,35 @@ from ui.icons import get_icon_manager
 
 
 def setup_logging():
-    """Настраивает логирование ДО всех операций"""
+    """Настраивает логирование ДО всех операций с ротацией"""
     from core.config_manager import get_app_data_dir
+    from logging.handlers import RotatingFileHandler
+
     app_data_dir = get_app_data_dir()
     logs_dir = app_data_dir / "logs"
     logs_dir.mkdir(exist_ok=True)
 
     log_file = logs_dir / "zenzefi_client.log"
 
+    # Ротирующий обработчик: макс 5MB, 5 резервных копий
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_file, encoding='utf-8')
-        ]
+        handlers=[console_handler, file_handler]
     )
 
 
@@ -100,22 +114,25 @@ def main():
         # Создаем менеджер прокси
         proxy_manager = get_proxy_manager()
 
-        # Создаем и показываем главное окно или трей
+        # Создаем и показываем главное окно или трей (lazy loading)
         from core.config_manager import get_config
         config = get_config()
         start_minimized = config.get('application.start_minimized', False)
 
-        main_window = None
+        # Создаем иконку в трее сразу
+        from ui.tray_icon import TrayIcon
+        tray_icon = TrayIcon(app, proxy_manager)
+        tray_icon.show()
+
+        # MainWindow создается только если не запущен в свернутом виде
+        # или при клике на трее (lazy loading)
         if not start_minimized:
             from ui.main_window import MainWindow
             main_window = MainWindow(proxy_manager)
             main_window.show()
-
-        # Создаем иконку в трее
-        from ui.tray_icon import TrayIcon
-        tray_icon = TrayIcon(app, proxy_manager)
-        tray_icon.main_window = main_window
-        tray_icon.show()
+            tray_icon.main_window = main_window
+        else:
+            logger.info("🚀 Запуск в свернутом режиме, окно будет создано по требованию")
 
         logger.info("✅ Приложение запущено успешно")
 
