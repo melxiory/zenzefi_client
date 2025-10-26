@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self.proxy_manager = proxy_manager
         self.proxy_thread = None
         self.current_status = {}
+        self.open_browser_after_start = False  # Флаг для открытия браузера после запуска
 
         self.setup_ui()
 
@@ -208,19 +209,30 @@ class MainWindow(QMainWindow):
         self.token_status_label = QLabel("Статус: ⚠️ Не установлен")
         auth_layout.addWidget(self.token_status_label)
 
+        # Статус cookie аутентификации
+        self.auth_status_label = QLabel("Cookie статус: ⚪ Не проверен")
+        self.auth_status_label.setStyleSheet("color: #888888;")
+        auth_layout.addWidget(self.auth_status_label)
+
         # Кнопки
         token_buttons_layout = QHBoxLayout()
         self.save_token_btn = QPushButton("Сохранить")
         self.clear_token_btn = QPushButton("Очистить")
         self.toggle_token_visibility_btn = QPushButton("Показать токен")
+        self.check_auth_btn = QPushButton("Проверить статус")
+        self.logout_btn = QPushButton("🚪 Logout")
 
         self.save_token_btn.clicked.connect(self.save_token)
         self.clear_token_btn.clicked.connect(self.clear_token)
         self.toggle_token_visibility_btn.clicked.connect(self.toggle_token_visibility)
+        self.check_auth_btn.clicked.connect(self.on_check_auth_clicked)
+        self.logout_btn.clicked.connect(self.on_logout_clicked)
 
         token_buttons_layout.addWidget(self.save_token_btn)
         token_buttons_layout.addWidget(self.clear_token_btn)
         token_buttons_layout.addWidget(self.toggle_token_visibility_btn)
+        token_buttons_layout.addWidget(self.check_auth_btn)
+        token_buttons_layout.addWidget(self.logout_btn)
         token_buttons_layout.addStretch()
         auth_layout.addLayout(token_buttons_layout)
 
@@ -386,6 +398,120 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Ошибка переключения видимости токена: {e}")
 
+    def on_check_auth_clicked(self):
+        """Обработчик кнопки проверки статуса"""
+        try:
+            import asyncio
+            import qasync
+
+            # Запускаем асинхронную проверку
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.check_auth_status())
+        except Exception as e:
+            logger.error(f"Ошибка при проверке статуса: {e}")
+            self.auth_status_label.setText("Cookie статус: ❌ Ошибка проверки")
+            self.auth_status_label.setStyleSheet("color: #E4002B;")
+
+    async def check_auth_status(self):
+        """Проверить статус аутентификации"""
+        try:
+            from core.auth_manager import get_auth_manager
+
+            remote_url = self.url_input.text().strip()
+            if not remote_url:
+                remote_url = self.config.get('proxy.remote_url', 'http://localhost:8000')
+
+            auth_manager = get_auth_manager(backend_url=remote_url)
+            success, status_data = await auth_manager.check_status()
+
+            if success and status_data:
+                logger.info(f"✅ Auth status checked: {status_data}")
+                self.update_auth_status_ui(status_data)
+            else:
+                logger.warning("⚠️ Authentication check failed")
+                self.auth_status_label.setText("Cookie статус: ❌ Не аутентифицирован")
+                self.auth_status_label.setStyleSheet("color: #E4002B;")
+        except Exception as e:
+            logger.error(f"Ошибка проверки статуса: {e}")
+            self.auth_status_label.setText("Cookie статус: ❌ Ошибка")
+            self.auth_status_label.setStyleSheet("color: #E4002B;")
+
+    def update_auth_status_ui(self, status_data):
+        """Обновить UI с информацией об аутентификации"""
+        try:
+            auth_via = status_data.get('authenticated_via', 'unknown')
+            time_remaining = status_data.get('time_remaining_seconds', 0)
+
+            hours = time_remaining // 3600
+            minutes = (time_remaining % 3600) // 60
+
+            self.auth_status_label.setText(
+                f"Cookie статус: ✅ Аутентифицирован ({auth_via}) | "
+                f"Осталось: {hours}ч {minutes}м"
+            )
+            self.auth_status_label.setStyleSheet("color: #00D4AA;")
+        except Exception as e:
+            logger.error(f"Ошибка обновления UI статуса: {e}")
+
+    def on_logout_clicked(self):
+        """Обработка нажатия кнопки logout"""
+        try:
+            reply = QMessageBox.question(
+                self,
+                'Подтверждение выхода',
+                'Вы уверены, что хотите выйти? Это удалит cookie аутентификации.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                # Асинхронный logout
+                import asyncio
+                loop = asyncio.get_event_loop()
+                loop.create_task(self.perform_logout())
+        except Exception as e:
+            logger.error(f"Ошибка при logout: {e}")
+
+    async def perform_logout(self):
+        """Выполнить logout"""
+        try:
+            from core.auth_manager import get_auth_manager
+
+            remote_url = self.url_input.text().strip()
+            if not remote_url:
+                remote_url = self.config.get('proxy.remote_url', 'http://localhost:8000')
+
+            auth_manager = get_auth_manager(backend_url=remote_url)
+            success = await auth_manager.logout()
+
+            if success:
+                logger.info("✅ Logged out successfully")
+
+                # Обновить UI
+                self.auth_status_label.setText("Cookie статус: ⚪ Вышли из системы")
+                self.auth_status_label.setStyleSheet("color: #888888;")
+
+                QMessageBox.information(
+                    self,
+                    "Выход выполнен",
+                    "Вы успешно вышли из системы."
+                )
+            else:
+                logger.error("❌ Logout failed")
+
+                QMessageBox.warning(
+                    self,
+                    "Ошибка выхода",
+                    "Не удалось выйти. Попробуйте снова."
+                )
+        except Exception as e:
+            logger.error(f"Ошибка logout: {e}")
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Произошла ошибка: {e}"
+            )
+
     def start_proxy(self):
         """Запускает прокси"""
         # СТРОГАЯ БЛОКИРОВКА: Проверка токена ПЕРЕД запуском
@@ -410,6 +536,7 @@ class MainWindow(QMainWindow):
             return
 
         self.save_config()
+        self.open_browser_after_start = True  # Устанавливаем флаг для открытия браузера
         self.start_proxy_thread("start", remote_url)
 
     def stop_proxy(self):
@@ -455,8 +582,46 @@ class MainWindow(QMainWindow):
         try:
             self.current_status = status
             self.update_status_display()
+
+            # Открываем браузер на auth странице если прокси только что запустился
+            if self.open_browser_after_start and status.get('running', False):
+                self.open_browser_after_start = False
+                self.open_auth_page()
         except Exception as e:
             logger.error(f"Ошибка обновления статуса: {e}")
+
+    def open_auth_page(self):
+        """Открывает браузер на странице аутентификации"""
+        try:
+            import webbrowser
+
+            access_token = self.config.get_access_token()
+            if not access_token:
+                logger.warning("⚠️ Не могу открыть auth страницу: токен не найден")
+                return
+
+            local_port = self.config.get('proxy.local_port', 61000)
+            auth_url = f"https://127.0.0.1:{local_port}/api/v1/proxy?token={access_token}"
+
+            logger.info(f"🌐 Открываем браузер: {auth_url}")
+            webbrowser.open(auth_url)
+
+            # Показываем сообщение пользователю
+            QMessageBox.information(
+                self,
+                "Аутентификация",
+                "Браузер открыт для аутентификации.\n\n"
+                "После успешной аутентификации вы будете перенаправлены на приложение.\n"
+                "Cookie будет автоматически установлен для всех последующих запросов."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка открытия браузера: {e}")
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                f"Не удалось открыть браузер: {e}\n\n"
+                f"Откройте вручную: https://127.0.0.1:{self.config.get('proxy.local_port', 61000)}/api/v1/proxy"
+            )
 
     def update_status(self):
         """Обновляет статус"""

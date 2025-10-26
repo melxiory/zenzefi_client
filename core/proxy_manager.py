@@ -10,6 +10,7 @@ from utils.process_manager import get_process_manager
 from utils.port_utils import check_port_availability, get_process_using_port
 from core.config_manager import get_app_data_dir
 from core.proxy import CacheManager, ContentRewriter
+from core.auth_manager import get_auth_manager
 import sys
 import gzip
 import zlib
@@ -143,6 +144,11 @@ class ZenzefiProxy:
         self.stats['active_connections'] += 1
 
         try:
+            # Специальная обработка для auth страницы
+            if request.path == '/api/v1/proxy' or request.path == '/api/v1/proxy/':
+                self.stats['active_connections'] -= 1
+                return await self._serve_auth_page(request)
+
             # Проверяем кэш для статических ресурсов
             cache_key = self.cache.generate_key(request.path, request.query_string)
 
@@ -202,24 +208,13 @@ class ZenzefiProxy:
                     if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
                         headers[key] = value
 
-                header_host = self.upstream_url.replace('https://', '')
+                header_host = self.upstream_url.replace('https://', '').replace('http://', '')
                 headers.update({
                     "Host": f"{header_host}",
                     "X-Real-IP": request.remote,
                     "X-Forwarded-For": request.remote,
                     "X-Forwarded-Proto": "https"
                 })
-
-                # Добавляем X-Access-Token для аутентификации на backend
-                from core.config_manager import get_config
-                config = get_config()
-                access_token = config.get_access_token()
-
-                if access_token:
-                    headers["X-Access-Token"] = access_token
-                    logger.debug(f"🔑 Using access token: {access_token[:8]}...")
-                else:
-                    logger.warning("⚠️ X-Access-Token не настроен, запросы могут быть отклонены")
 
                 upstream_url = f"{self.upstream_url}{request.path_qs}"
 
@@ -240,14 +235,14 @@ class ZenzefiProxy:
 
                     # Обработка ошибки 401 (Unauthorized)
                     if upstream_response.status == 401:
-                        logger.error("❌ Unauthorized: Access token недействителен или истёк")
+                        logger.error("❌ Unauthorized: Cookie аутентификации недействителен или истёк")
                         self.stats['errors'] += 1
                         self.stats['total_responses'] += 1
                         self.stats['active_connections'] -= 1
 
                         return web.Response(
-                            text="⚠️ Access token недействителен или истёк.\n\n"
-                                 "Пожалуйста, обновите токен в настройках приложения.",
+                            text="⚠️ Сессия аутентификации истекла.\n\n"
+                                 "Пожалуйста, перезапустите прокси для повторной аутентификации.",
                             status=401,
                             content_type="text/plain; charset=utf-8"
                         )
@@ -361,6 +356,178 @@ class ZenzefiProxy:
                 asyncio.create_task(self._cleanup_pending_request(cache_key))
 
             return web.Response(text=f"Proxy error: {str(e)}", status=500)
+
+    async def _serve_auth_page(self, request):
+        """
+        Служебная страница для первоначальной аутентификации
+
+        Эта страница:
+        1. Читает токен из sessionStorage или query параметров
+        2. Отправляет его на backend /authenticate endpoint
+        3. Backend устанавливает cookie
+        4. Перенаправляет на реальное приложение
+        """
+
+        # Проверяем есть ли уже токен в query параметрах
+        query = request.query
+        token = query.get('token', '')
+
+        # Если токена нет в query, попробуем получить из конфига
+        if not token:
+            from core.config_manager import get_config
+            config = get_config()
+            token = config.get_access_token() or ''
+
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Zenzefi Authentication</title>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    color: white;
+                }}
+                .container {{
+                    background: rgba(255, 255, 255, 0.1);
+                    backdrop-filter: blur(10px);
+                    padding: 40px;
+                    border-radius: 20px;
+                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+                    text-align: center;
+                    max-width: 500px;
+                }}
+                .spinner {{
+                    border: 4px solid rgba(255, 255, 255, 0.3);
+                    border-radius: 50%;
+                    border-top: 4px solid white;
+                    width: 50px;
+                    height: 50px;
+                    animation: spin 1s linear infinite;
+                    margin: 20px auto;
+                }}
+                @keyframes spin {{
+                    0% {{ transform: rotate(0deg); }}
+                    100% {{ transform: rotate(360deg); }}
+                }}
+                .message {{
+                    font-size: 18px;
+                    margin: 20px 0;
+                }}
+                .error {{
+                    background: rgba(220, 38, 38, 0.8);
+                    padding: 15px;
+                    border-radius: 10px;
+                    margin-top: 20px;
+                }}
+                .success {{
+                    background: rgba(34, 197, 94, 0.8);
+                    padding: 15px;
+                    border-radius: 10px;
+                    margin-top: 20px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🔐 Zenzefi Authentication</h1>
+                <div class="spinner" id="spinner"></div>
+                <div class="message" id="message">Authenticating...</div>
+            </div>
+
+            <script>
+                const backendUrl = '{self.upstream_url}';
+                const token = '{token}' || sessionStorage.getItem('zenzefi_token');
+
+                async function authenticate() {{
+                    const spinner = document.getElementById('spinner');
+                    const message = document.getElementById('message');
+
+                    if (!token) {{
+                        spinner.style.display = 'none';
+                        message.innerHTML = '<div class="error">❌ Токен не найден!<br>Пожалуйста, введите токен в приложении.</div>';
+                        return;
+                    }}
+
+                    try {{
+                        // Отправляем токен на backend для установки cookie
+                        const response = await fetch(`${{backendUrl}}/api/v1/proxy/authenticate`, {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/json',
+                            }},
+                            body: JSON.stringify({{ token: token }}),
+                            credentials: 'include'  // Важно для cookie
+                        }});
+
+                        if (response.ok) {{
+                            const data = await response.json();
+
+                            spinner.style.display = 'none';
+                            message.innerHTML = `
+                                <div class="success">
+                                    ✅ Аутентификация успешна!<br>
+                                    <small>User ID: ${{data.user_id}}</small><br>
+                                    <small>Истекает: ${{new Date(data.expires_at).toLocaleString()}}</small><br>
+                                    <br>
+                                    Перенаправление...
+                                </div>
+                            `;
+
+                            // Перенаправляем на основное приложение через 2 секунды
+                            setTimeout(() => {{
+                                window.location.href = '${{backendUrl}}/';
+                            }}, 2000);
+
+                        }} else {{
+                            const errorData = await response.json();
+
+                            spinner.style.display = 'none';
+                            message.innerHTML = `
+                                <div class="error">
+                                    ❌ Ошибка аутентификации!<br>
+                                    <small>${{errorData.detail || 'Unknown error'}}</small>
+                                </div>
+                            `;
+                        }}
+
+                    }} catch (error) {{
+                        spinner.style.display = 'none';
+                        message.innerHTML = `
+                            <div class="error">
+                                ❌ Ошибка сети!<br>
+                                <small>${{error.message}}</small><br>
+                                <small>Backend доступен на ${{backendUrl}}?</small>
+                            </div>
+                        `;
+                        console.error('Authentication error:', error);
+                    }}
+                }}
+
+                // Запускаем аутентификацию при загрузке
+                authenticate();
+            </script>
+        </body>
+        </html>
+        """
+
+        return web.Response(
+            text=html,
+            content_type='text/html',
+            headers={
+                'Cache-Control': 'no-store, no-cache, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+        )
 
     async def _cleanup_pending_request(self, cache_key: str, delay: float = 0.1):
         """Очистка завершённого запроса из pending_requests"""

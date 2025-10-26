@@ -125,13 +125,25 @@ class TrayIcon(QSystemTrayIcon):
 
             success = self.nginx_manager.start(61000, remote_url)
             if success:
-                self.showMessage("Zenzefi Client", "Nginx успешно запущен",
+                self.showMessage("Zenzefi Client",
+                                 "Прокси запущен.\n\nОткрываем браузер для аутентификации...",
                                  QSystemTrayIcon.Information, 3000)
-                logger.info("Nginx запущен из трея")
+                logger.info("Прокси запущен из трея")
+
+                # Открываем браузер для cookie аутентификации
+                try:
+                    import webbrowser
+                    access_token = config.get_access_token()
+                    local_port = config.get('proxy.local_port', 61000)
+                    auth_url = f"https://127.0.0.1:{local_port}/api/v1/proxy?token={access_token}"
+                    webbrowser.open(auth_url)
+                    logger.info(f"🌐 Браузер открыт для auth: {auth_url}")
+                except Exception as e:
+                    logger.error(f"Ошибка открытия браузера: {e}")
             else:
-                self.showMessage("Zenzefi Client", "Ошибка запуска Nginx",
+                self.showMessage("Zenzefi Client", "Ошибка запуска прокси",
                                  QSystemTrayIcon.Critical, 5000)
-                logger.error("Ошибка запуска Nginx из трея")
+                logger.error("Ошибка запуска прокси из трея")
         except Exception as e:
             logger.error(f"Ошибка запуска nginx из трея: {e}")
             self.showMessage("Zenzefi Client", f"Ошибка: {e}",
