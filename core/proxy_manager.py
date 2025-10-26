@@ -210,6 +210,17 @@ class ZenzefiProxy:
                     "X-Forwarded-Proto": "https"
                 })
 
+                # Добавляем X-Access-Token для аутентификации на backend
+                from core.config_manager import get_config
+                config = get_config()
+                access_token = config.get_access_token()
+
+                if access_token:
+                    headers["X-Access-Token"] = access_token
+                    logger.debug(f"🔑 Using access token: {access_token[:8]}...")
+                else:
+                    logger.warning("⚠️ X-Access-Token не настроен, запросы могут быть отклонены")
+
                 upstream_url = f"{self.upstream_url}{request.path_qs}"
 
                 cookie_jar = aiohttp.CookieJar()
@@ -226,6 +237,20 @@ class ZenzefiProxy:
                         data=body,
                         allow_redirects=False
                 ) as upstream_response:
+
+                    # Обработка ошибки 401 (Unauthorized)
+                    if upstream_response.status == 401:
+                        logger.error("❌ Unauthorized: Access token недействителен или истёк")
+                        self.stats['errors'] += 1
+                        self.stats['total_responses'] += 1
+                        self.stats['active_connections'] -= 1
+
+                        return web.Response(
+                            text="⚠️ Access token недействителен или истёк.\n\n"
+                                 "Пожалуйста, обновите токен в настройках приложения.",
+                            status=401,
+                            content_type="text/plain; charset=utf-8"
+                        )
 
                     response_headers = {}
                     for key, value in upstream_response.headers.items():

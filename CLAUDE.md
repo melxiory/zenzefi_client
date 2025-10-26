@@ -204,9 +204,17 @@ The `ZenzefiClient.spec` file configures:
 - Resource bundling from `resources/` directory
 - No console window (`console=False`)
 - Windows icon and version info
-- UPX compression enabled
+- UPX compression enabled (30-50% size reduction)
+- Strip disabled on Windows (requires GNU binutils, not available)
+
+**Critical module exclusions:**
+- Most unused libraries are excluded to reduce size (tkinter, matplotlib, numpy, pandas, etc.)
+- **DO NOT exclude:** `email`, `html`, `xml.etree` - required by `cryptography` and `aiohttp`
+- Excluding these will cause runtime errors: "No module named 'email'" during certificate generation
 
 **Resources access:** In frozen mode, resources are accessed via PyInstaller's temp directory mechanism. The `get_app_data_dir()` function handles path resolution for both dev and frozen modes.
+
+**Build warnings:** "Failed to run strip" warnings on Windows are normal and harmless - strip is a Unix-only tool.
 
 ## Important Patterns
 

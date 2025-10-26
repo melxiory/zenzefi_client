@@ -191,6 +191,41 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(proxy_group)
 
+        # Группа аутентификации
+        auth_group = QGroupBox("Аутентификация")
+        auth_layout = QVBoxLayout(auth_group)
+
+        # Поле для токена
+        token_layout = QHBoxLayout()
+        token_layout.addWidget(QLabel("Access Token:"))
+        self.token_input = QLineEdit()
+        self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_input.setPlaceholderText("Введите токен доступа")
+        token_layout.addWidget(self.token_input)
+        auth_layout.addLayout(token_layout)
+
+        # Статус токена
+        self.token_status_label = QLabel("Статус: ⚠️ Не установлен")
+        auth_layout.addWidget(self.token_status_label)
+
+        # Кнопки
+        token_buttons_layout = QHBoxLayout()
+        self.save_token_btn = QPushButton("Сохранить")
+        self.clear_token_btn = QPushButton("Очистить")
+        self.toggle_token_visibility_btn = QPushButton("Показать токен")
+
+        self.save_token_btn.clicked.connect(self.save_token)
+        self.clear_token_btn.clicked.connect(self.clear_token)
+        self.toggle_token_visibility_btn.clicked.connect(self.toggle_token_visibility)
+
+        token_buttons_layout.addWidget(self.save_token_btn)
+        token_buttons_layout.addWidget(self.clear_token_btn)
+        token_buttons_layout.addWidget(self.toggle_token_visibility_btn)
+        token_buttons_layout.addStretch()
+        auth_layout.addLayout(token_buttons_layout)
+
+        layout.addWidget(auth_group)
+
         # Группа логов
         log_group = QGroupBox("Логирование")
         log_layout = QVBoxLayout(log_group)
@@ -267,6 +302,16 @@ class MainWindow(QMainWindow):
             if not remote_url:
                 remote_url = 'https://zenzefi.melxiory.ru'
             self.url_input.setText(remote_url)
+
+            # Загружаем токен
+            token = self.config.get_access_token()
+            if token:
+                self.token_input.setText(token)
+                self.token_status_label.setText("Статус: ✅ Токен установлен")
+                self.token_status_label.setStyleSheet("color: #00D4AA;")
+            else:
+                self.token_status_label.setText("Статус: ⚠️ Не установлен")
+                self.token_status_label.setStyleSheet("color: #FFA500;")
         except Exception as e:
             logger.error(f"Ошибка загрузки конфига: {e}")
             self.url_input.setText('https://zenzefi.melxiory.ru')
@@ -282,8 +327,79 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Ошибка сохранения конфига: {e}")
 
+    def save_token(self):
+        """Сохраняет токен в конфиг"""
+        try:
+            token = self.token_input.text().strip()
+            if not token:
+                self.token_status_label.setText("Статус: ❌ Токен не может быть пустым")
+                self.token_status_label.setStyleSheet("color: #E4002B;")
+                QMessageBox.warning(self, "Ошибка", "Токен не может быть пустым")
+                return
+
+            if self.config.set_access_token(token):
+                self.token_status_label.setText("Статус: ✅ Токен сохранён")
+                self.token_status_label.setStyleSheet("color: #00D4AA;")
+                logger.info("✅ Access token сохранён")
+                QMessageBox.information(self, "Успех", "Access token успешно сохранён")
+            else:
+                self.token_status_label.setText("Статус: ❌ Ошибка сохранения")
+                self.token_status_label.setStyleSheet("color: #E4002B;")
+                QMessageBox.critical(self, "Ошибка", "Не удалось сохранить токен")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения токена: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Ошибка: {e}")
+
+    def clear_token(self):
+        """Очищает токен"""
+        try:
+            reply = QMessageBox.question(
+                self,
+                "Подтверждение",
+                "Вы уверены, что хотите удалить токен?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                if self.config.clear_access_token():
+                    self.token_input.clear()
+                    self.token_status_label.setText("Статус: ⚠️ Токен удалён")
+                    self.token_status_label.setStyleSheet("color: #FFA500;")
+                    logger.info("🗑️ Access token удалён")
+                    QMessageBox.information(self, "Успех", "Токен успешно удалён")
+                else:
+                    QMessageBox.critical(self, "Ошибка", "Не удалось удалить токен")
+        except Exception as e:
+            logger.error(f"Ошибка удаления токена: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Ошибка: {e}")
+
+    def toggle_token_visibility(self):
+        """Переключает видимость токена"""
+        try:
+            if self.token_input.echoMode() == QLineEdit.EchoMode.Password:
+                self.token_input.setEchoMode(QLineEdit.EchoMode.Normal)
+                self.toggle_token_visibility_btn.setText("Скрыть токен")
+            else:
+                self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
+                self.toggle_token_visibility_btn.setText("Показать токен")
+        except Exception as e:
+            logger.error(f"Ошибка переключения видимости токена: {e}")
+
     def start_proxy(self):
         """Запускает прокси"""
+        # СТРОГАЯ БЛОКИРОВКА: Проверка токена ПЕРЕД запуском
+        if not self.config.has_access_token():
+            QMessageBox.critical(
+                self,
+                "Ошибка аутентификации",
+                "Access token не настроен.\n\n"
+                "Для работы прокси требуется токен доступа.\n"
+                "Пожалуйста, введите токен в разделе 'Аутентификация' и нажмите 'Сохранить'."
+            )
+            logger.warning("⚠️ Попытка запуска прокси без токена")
+            return
+
         remote_url = self.url_input.text().strip()
         if not remote_url:
             QMessageBox.warning(self, "Ошибка", "Введите URL для проксирования")

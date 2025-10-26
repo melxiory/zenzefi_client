@@ -73,12 +73,22 @@ class TrayIcon(QSystemTrayIcon):
             status = self.nginx_manager.get_status()
             icon_manager = get_icon_manager()
 
+            # Получаем статус токена
+            from core.config_manager import get_config
+            config = get_config()
+            token_status = "✅ Настроен" if config.has_access_token() else "❌ Не настроен"
+
             if status['running']:
                 self.setIcon(icon_manager.get_icon("green_system_trie.png"))
-                tooltip = "Zenzefi Client - Запущен"
+                proxy_status = "Запущен"
+                tooltip = (f"Zenzefi Client - {proxy_status}\n"
+                          f"Прокси: https://127.0.0.1:61000\n"
+                          f"Токен: {token_status}")
             else:
                 self.setIcon(icon_manager.get_icon("red_system_trie.png"))
-                tooltip = "Zenzefi Client - Остановлен"
+                proxy_status = "Остановлен"
+                tooltip = (f"Zenzefi Client - {proxy_status}\n"
+                          f"Токен: {token_status}")
 
             self.setToolTip(tooltip)
         except Exception as e:
@@ -98,6 +108,19 @@ class TrayIcon(QSystemTrayIcon):
         try:
             from core.config_manager import get_config
             config = get_config()
+
+            # СТРОГАЯ БЛОКИРОВКА: Проверка токена перед запуском
+            if not config.has_access_token():
+                self.showMessage(
+                    "Zenzefi Client",
+                    "Ошибка: Access token не настроен.\n"
+                    "Откройте главное окно и настройте токен.",
+                    QSystemTrayIcon.Critical,
+                    5000
+                )
+                logger.warning("⚠️ Попытка запуска прокси из трея без токена")
+                return
+
             remote_url = config.get('proxy.remote_url', 'https://zenzefi.melxiory.ru')
 
             success = self.nginx_manager.start(61000, remote_url)

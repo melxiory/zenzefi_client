@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 import os
+from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ def get_app_data_dir():
 class ConfigManager:
     def __init__(self):
         self.config_path = self._get_config_path()
+        self.cipher = self._get_cipher()
         self.config = self._load_config()
 
     def _get_config_path(self) -> Path:
@@ -42,6 +44,28 @@ class ConfigManager:
 
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir / 'config.json'
+
+    def _get_cipher(self) -> Fernet:
+        """Возвращает объект шифрования, генерируя ключ при необходимости"""
+        key_path = get_app_data_dir() / '.encryption_key'
+
+        try:
+            if key_path.exists():
+                # Загружаем существующий ключ
+                with open(key_path, 'rb') as key_file:
+                    key = key_file.read()
+            else:
+                # Генерируем новый ключ
+                key = Fernet.generate_key()
+                with open(key_path, 'wb') as key_file:
+                    key_file.write(key)
+                logger.info("🔑 Ключ шифрования сгенерирован")
+
+            return Fernet(key)
+        except Exception as e:
+            logger.error(f"Ошибка инициализации шифрования: {e}")
+            # Fallback: генерируем временный ключ
+            return Fernet(Fernet.generate_key())
 
     def _get_default_config(self) -> dict:
         """Возвращает конфигурацию по умолчанию"""
@@ -187,6 +211,54 @@ class ConfigManager:
         """Сбрасывает настройки к значениям по умолчанию"""
         self.config = self._get_default_config()
         return self.save()
+
+    def get_access_token(self) -> Optional[str]:
+        """Получает расшифрованный access token"""
+        try:
+            if 'auth' in self.config and 'access_token_encrypted' in self.config['auth']:
+                encrypted = self.config['auth']['access_token_encrypted']
+                decrypted = self.cipher.decrypt(encrypted.encode()).decode('utf-8')
+                return decrypted
+        except Exception as e:
+            logger.error(f"Ошибка расшифровки токена: {e}")
+        return None
+
+    def set_access_token(self, token: str) -> bool:
+        """Сохраняет зашифрованный access token"""
+        try:
+            if not token or not token.strip():
+                logger.warning("Попытка сохранить пустой токен")
+                return False
+
+            if 'auth' not in self.config:
+                self.config['auth'] = {}
+
+            encrypted = self.cipher.encrypt(token.encode()).decode('utf-8')
+            self.config['auth']['access_token_encrypted'] = encrypted
+            return self.save()
+        except Exception as e:
+            logger.error(f"Ошибка сохранения токена: {e}")
+            return False
+
+    def clear_access_token(self) -> bool:
+        """Удаляет токен из конфигурации"""
+        try:
+            if 'auth' in self.config and 'access_token_encrypted' in self.config['auth']:
+                del self.config['auth']['access_token_encrypted']
+                # Если секция auth пустая, удаляем её
+                if not self.config['auth']:
+                    del self.config['auth']
+                return self.save()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления токена: {e}")
+            return False
+
+    def has_access_token(self) -> bool:
+        """Проверяет наличие access token"""
+        return ('auth' in self.config and
+                'access_token_encrypted' in self.config['auth'] and
+                bool(self.config['auth']['access_token_encrypted']))
 
 
 # Синглтон для глобального доступа
