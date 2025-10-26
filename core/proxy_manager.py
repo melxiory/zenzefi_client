@@ -262,7 +262,7 @@ class ZenzefiProxy:
                             text="⚠️ Сессия аутентификации истекла.\n\n"
                                  "Пожалуйста, перезапустите прокси для повторной аутентификации.",
                             status=401,
-                            content_type="text/plain; charset=utf-8"
+                            content_type="text/plain"
                         )
 
                     response_headers = {}
@@ -472,7 +472,9 @@ class ZenzefiProxy:
             </div>
 
             <script>
-                const backendUrl = '{self.upstream_url}';
+                // ВАЖНО: backendUrl должен указывать на локальный backend, а НЕ на Zenzefi Server
+                const backendUrl = 'http://127.0.0.1:8000';
+                const zenzefiUrl = '{self.upstream_url}';
                 const token = '{token}' || sessionStorage.getItem('zenzefi_token');
 
                 async function authenticate() {{
@@ -504,15 +506,15 @@ class ZenzefiProxy:
                                 <div class="success">
                                     ✅ Аутентификация успешна!<br>
                                     <small>User ID: ${{data.user_id}}</small><br>
-                                    <small>Истекает: ${{new Date(data.expires_at).toLocaleString()}}</small><br>
+                                    <small>Истекает: ${{data.expires_at ? new Date(data.expires_at).toLocaleString() : 'Не активирован'}}</small><br>
                                     <br>
                                     Перенаправление...
                                 </div>
                             `;
 
-                            // Перенаправляем на основное приложение через 2 секунды
+                            // Перенаправляем на проксированное приложение через 2 секунды
                             setTimeout(() => {{
-                                window.location.href = '${{backendUrl}}/';
+                                window.location.href = '${{backendUrl}}/api/v1/proxy/';
                             }}, 2000);
 
                         }} else {{

@@ -401,16 +401,23 @@ class MainWindow(QMainWindow):
     def on_check_auth_clicked(self):
         """Обработчик кнопки проверки статуса"""
         try:
-            import asyncio
-            import qasync
-
-            # Запускаем асинхронную проверку
-            loop = asyncio.get_event_loop()
-            loop.create_task(self.check_auth_status())
+            # Запускаем проверку в отдельном потоке
+            import threading
+            thread = threading.Thread(target=self._run_check_auth_status)
+            thread.daemon = True
+            thread.start()
         except Exception as e:
             logger.error(f"Ошибка при проверке статуса: {e}")
             self.auth_status_label.setText("Cookie статус: ❌ Ошибка проверки")
             self.auth_status_label.setStyleSheet("color: #E4002B;")
+
+    def _run_check_auth_status(self):
+        """Запускает check_auth_status в новом event loop"""
+        import asyncio
+        try:
+            asyncio.run(self.check_auth_status())
+        except Exception as e:
+            logger.error(f"Ошибка в _run_check_auth_status: {e}")
 
     async def check_auth_status(self):
         """Проверить статус аутентификации"""
@@ -465,12 +472,21 @@ class MainWindow(QMainWindow):
             )
 
             if reply == QMessageBox.StandardButton.Yes:
-                # Асинхронный logout
-                import asyncio
-                loop = asyncio.get_event_loop()
-                loop.create_task(self.perform_logout())
+                # Запускаем logout в отдельном потоке
+                import threading
+                thread = threading.Thread(target=self._run_perform_logout)
+                thread.daemon = True
+                thread.start()
         except Exception as e:
             logger.error(f"Ошибка при logout: {e}")
+
+    def _run_perform_logout(self):
+        """Запускает perform_logout в новом event loop"""
+        import asyncio
+        try:
+            asyncio.run(self.perform_logout())
+        except Exception as e:
+            logger.error(f"Ошибка в _run_perform_logout: {e}")
 
     async def perform_logout(self):
         """Выполнить logout"""
