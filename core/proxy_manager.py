@@ -145,9 +145,23 @@ class ZenzefiProxy:
 
         try:
             # Специальная обработка для auth страницы
+            # Показываем HTML auth страницу только если:
+            # 1. Есть token в query параметрах (прямая ссылка из Desktop Client)
+            # 2. ИЛИ браузер запрашивает HTML (Accept: text/html) на корневой путь
             if request.path == '/api/v1/proxy' or request.path == '/api/v1/proxy/':
-                self.stats['active_connections'] -= 1
-                return await self._serve_auth_page(request)
+                # Проверяем наличие token в query
+                has_token = 'token' in request.query
+
+                # Проверяем Accept header
+                accept_header = request.headers.get('Accept', '')
+                wants_html = 'text/html' in accept_header
+
+                # Показываем auth страницу только если есть token ИЛИ браузер просит HTML
+                if has_token or (wants_html and not 'application/json' in accept_header):
+                    self.stats['active_connections'] -= 1
+                    return await self._serve_auth_page(request)
+
+                # Иначе проксируем запрос на backend (для API клиентов, ожидающих JSON)
 
             # Проверяем кэш для статических ресурсов
             cache_key = self.cache.generate_key(request.path, request.query_string)
@@ -361,11 +375,17 @@ class ZenzefiProxy:
         """
         Служебная страница для первоначальной аутентификации
 
-        Эта страница:
-        1. Читает токен из sessionStorage или query параметров
-        2. Отправляет его на backend /authenticate endpoint
-        3. Backend устанавливает cookie
+        Маршрутизация:
+        - /api/v1/proxy?token=... → HTML auth страница (этот метод)
+        - /api/v1/proxy/ (Accept: text/html) → HTML auth страница (этот метод)
+        - /api/v1/proxy/ (Accept: application/json) → проксируется на backend
+
+        Процесс аутентификации:
+        1. Читает токен из query параметров или конфига
+        2. JavaScript отправляет токен на backend /authenticate endpoint
+        3. Backend устанавливает HTTP-only secure cookie
         4. Перенаправляет на реальное приложение
+        5. Все последующие запросы автоматически содержат cookie
         """
 
         # Проверяем есть ли уже токен в query параметрах
