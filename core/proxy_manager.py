@@ -232,9 +232,12 @@ class ZenzefiProxy:
 
                 upstream_url = f"{self.upstream_url}{request.path_qs}"
 
-                cookie_jar = aiohttp.CookieJar()
+                # Копируем cookies от клиента для отправки на backend
+                # Это критично для cookie-based аутентификации!
+                cookies = {}
                 for name, value in request.cookies.items():
-                    cookie_jar.update_cookies({name: value})
+                    cookies[name] = value
+                    logger.debug(f"🍪 Forwarding cookie: {name}")
 
                 # Используем переиспользуемую сессию
                 await self.initialize()
@@ -244,6 +247,7 @@ class ZenzefiProxy:
                         url=upstream_url,
                         headers=headers,
                         data=body,
+                        cookies=cookies,  # КРИТИЧНО! Пересылаем cookies на backend
                         allow_redirects=False
                 ) as upstream_response:
 
@@ -273,6 +277,10 @@ class ZenzefiProxy:
 
                         if key_lower == 'location':
                             value = value.replace(self.upstream_url, self.local_url)
+
+                        # Специальная обработка Set-Cookie для правильной пересылки
+                        if key_lower == 'set-cookie':
+                            logger.debug(f"🍪 Forwarding Set-Cookie from backend: {value[:50]}...")
 
                         response_headers[key] = value
 
