@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 class ZenzefiProxy:
     def __init__(self):
         self.upstream_url = "https://zenzefi.melxiory.ru"
-        # ВАЖНО: local_url должен включать /api/v1/proxy для правильной перезаписи URL
-        self.local_url = "https://127.0.0.1:61000/api/v1/proxy"
+        # Local URL БЕЗ префикса - чистый URL для браузера
+        # Backend получит запросы с префиксом /api/v1/proxy (добавляется при проксировании)
+        self.local_url = "https://127.0.0.1:61000"
 
         # Connection pool для переиспользования соединений
         self.connector = None
@@ -108,14 +109,19 @@ class ZenzefiProxy:
                     if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
                         headers[key] = value
 
+                # Передаем local_url в backend для правильного content rewriting
+                # Backend должен переписывать URL на этот адрес (БЕЗ префикса /api/v1/proxy)
+                headers['X-Local-Url'] = self.local_url
+
                 # Копируем cookies от браузера
                 cookies = {}
                 for name, value in request.cookies.items():
                     cookies[name] = value
                     logger.debug(f"🍪 Forwarding cookie to backend: {name}")
 
-                # Формируем URL на backend
-                upstream_url = f"{backend_url}{request.path_qs}"
+                # Формируем URL на backend с префиксом /api/v1/proxy
+                # Браузер видит чистый URL, но backend получает с префиксом
+                upstream_url = f"{backend_url}/api/v1/proxy{request.path_qs}"
                 logger.debug(f"🔐 Proxying to backend: {upstream_url}")
 
                 # Используем переиспользуемую сессию
@@ -356,8 +362,8 @@ class ProxyManager:
             # Создаем прокси
             self.proxy = ZenzefiProxy()
             self.proxy.upstream_url = self.remote_url
-            # ВАЖНО: local_url должен включать /api/v1/proxy для правильной перезаписи URL
-            self.proxy.local_url = f"https://127.0.0.1:{self.local_port}/api/v1/proxy"
+            # Local URL БЕЗ префикса - для чистых URL в браузере
+            self.proxy.local_url = f"https://127.0.0.1:{self.local_port}"
 
             # Инициализируем connection pool
             await self.proxy.initialize()

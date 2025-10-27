@@ -475,7 +475,7 @@ class MainWindow(QMainWindow):
                 'Logout через браузер',
                 'Для выхода из системы:\n\n'
                 '1. Откройте браузер с прокси\n'
-                '2. Перейдите на https://127.0.0.1:61000/api/v1/proxy/logout\n'
+                '2. Перейдите на https://127.0.0.1:61000/logout\n'
                 '3. Или просто закройте браузер\n\n'
                 'Cookie хранится в браузере, не в desktop client.',
                 QMessageBox.StandardButton.Ok
