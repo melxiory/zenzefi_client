@@ -28,7 +28,8 @@ class ZenzefiProxy:
 
     def __init__(self):
         self.upstream_url = "https://zenzefi.melxiory.ru"
-        self.local_url = "https://127.0.0.1:61000"
+        # ВАЖНО: local_url должен включать /api/v1/proxy для правильной перезаписи URL
+        self.local_url = "https://127.0.0.1:61000/api/v1/proxy"
         self.ssl_context = None
 
         # Кэш для статических ресурсов
@@ -148,20 +149,34 @@ class ZenzefiProxy:
             # Показываем HTML auth страницу только если:
             # 1. Есть token в query параметрах (прямая ссылка из Desktop Client)
             # 2. ИЛИ браузер запрашивает HTML (Accept: text/html) на корневой путь
+            # 3. НО только если cookie НЕ установлена (иначе бесконечный редирект!)
             if request.path == '/api/v1/proxy' or request.path == '/api/v1/proxy/':
-                # Проверяем наличие token в query
-                has_token = 'token' in request.query
+                # Проверяем наличие cookie аутентификации
+                has_cookie = 'zenzefi_access_token' in request.cookies
 
-                # Проверяем Accept header
-                accept_header = request.headers.get('Accept', '')
-                wants_html = 'text/html' in accept_header
+                # Если cookie уже есть - проксируем на backend, НЕ показываем auth страницу
+                if has_cookie:
+                    logger.debug("🍪 Cookie found, proxying to backend instead of showing auth page")
+                    # Продолжаем обычную обработку (будет проксировано на backend)
+                else:
+                    # Проверяем наличие token в query
+                    has_token = 'token' in request.query
 
-                # Показываем auth страницу только если есть token ИЛИ браузер просит HTML
-                if has_token or (wants_html and not 'application/json' in accept_header):
-                    self.stats['active_connections'] -= 1
-                    return await self._serve_auth_page(request)
+                    # Проверяем Accept header
+                    accept_header = request.headers.get('Accept', '')
+                    wants_html = 'text/html' in accept_header
+
+                    # Показываем auth страницу только если есть token ИЛИ браузер просит HTML
+                    if has_token or (wants_html and not 'application/json' in accept_header):
+                        self.stats['active_connections'] -= 1
+                        return await self._serve_auth_page(request)
 
                 # Иначе проксируем запрос на backend (для API клиентов, ожидающих JSON)
+
+            # ВСЕ запросы теперь идут через backend!
+            # Backend валидирует cookie и проксирует на Zenzefi с правильной аутентификацией
+            # Это нужно для cookie-based auth архитектуры
+            return await self._proxy_to_backend(request)
 
             # Проверяем кэш для статических ресурсов
             cache_key = self.cache.generate_key(request.path, request.query_string)
@@ -230,7 +245,19 @@ class ZenzefiProxy:
                     "X-Forwarded-Proto": "https"
                 })
 
-                upstream_url = f"{self.upstream_url}{request.path_qs}"
+                # Убираем префикс /api/v1/proxy/ из пути перед отправкой на Zenzefi
+                # Zenzefi server не знает про этот префикс (это внутренний путь backend)
+                clean_path = request.path_qs
+                if clean_path.startswith('/api/v1/proxy/'):
+                    clean_path = clean_path[len('/api/v1/proxy/'):]
+                elif clean_path.startswith('/api/v1/proxy'):
+                    clean_path = clean_path[len('/api/v1/proxy'):]
+
+                # Добавляем ведущий слеш если его нет
+                if not clean_path.startswith('/'):
+                    clean_path = '/' + clean_path
+
+                upstream_url = f"{self.upstream_url}{clean_path}"
 
                 # Копируем cookies от клиента для отправки на backend
                 # Это критично для cookie-based аутентификации!
@@ -472,9 +499,7 @@ class ZenzefiProxy:
             </div>
 
             <script>
-                // ВАЖНО: backendUrl должен указывать на локальный backend, а НЕ на Zenzefi Server
-                const backendUrl = 'http://127.0.0.1:8000';
-                const zenzefiUrl = '{self.upstream_url}';
+                // Используем текущий origin (локальный proxy) вместо прямого вызова backend
                 const token = '{token}' || sessionStorage.getItem('zenzefi_token');
 
                 async function authenticate() {{
@@ -488,8 +513,8 @@ class ZenzefiProxy:
                     }}
 
                     try {{
-                        // Отправляем токен на backend для установки cookie
-                        const response = await fetch(`${{backendUrl}}/api/v1/proxy/authenticate`, {{
+                        // Отправляем токен на backend через локальный proxy (относительный URL)
+                        const response = await fetch('/api/v1/proxy/authenticate', {{
                             method: 'POST',
                             headers: {{
                                 'Content-Type': 'application/json',
@@ -512,9 +537,9 @@ class ZenzefiProxy:
                                 </div>
                             `;
 
-                            // Перенаправляем на проксированное приложение через 2 секунды
+                            // Перенаправляем на проксированное приложение через локальный proxy
                             setTimeout(() => {{
-                                window.location.href = '${{backendUrl}}/api/v1/proxy/';
+                                window.location.href = '/api/v1/proxy/';
                             }}, 2000);
 
                         }} else {{
@@ -535,7 +560,8 @@ class ZenzefiProxy:
                             <div class="error">
                                 ❌ Ошибка сети!<br>
                                 <small>${{error.message}}</small><br>
-                                <small>Backend доступен на ${{backendUrl}}?</small>
+                                <small>Backend доступен на <code>${{backendUrl}}</code>?</small><br>
+                                <small>Убедитесь, что backend запущен (poetry run uvicorn app.main:app --reload)</small>
                             </div>
                         `;
                         console.error('Authentication error:', error);
@@ -558,6 +584,97 @@ class ZenzefiProxy:
                 'Expires': '0'
             }
         )
+
+    async def _proxy_to_backend(self, request):
+        """
+        Проксирует auth endpoints на backend (127.0.0.1:8000)
+
+        Этот метод обрабатывает:
+        - /api/v1/proxy/authenticate
+        - /api/v1/proxy/status
+        - /api/v1/proxy/logout
+        """
+        backend_url = "http://127.0.0.1:8000"
+
+        try:
+            # Читаем тело запроса
+            body = await request.read()
+
+            # Подготовка заголовков
+            headers = {}
+            for key, value in request.headers.items():
+                key_lower = key.lower()
+                if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
+                    headers[key] = value
+
+            # Копируем cookies от браузера
+            cookies = {}
+            for name, value in request.cookies.items():
+                cookies[name] = value
+                logger.debug(f"🍪 Forwarding cookie to backend: {name}")
+
+            # Формируем URL на backend
+            upstream_url = f"{backend_url}{request.path_qs}"
+            logger.info(f"🔐 Proxying auth request to backend: {upstream_url}")
+
+            # Используем переиспользуемую сессию
+            await self.initialize()
+
+            async with self.session.request(
+                method=request.method,
+                url=upstream_url,
+                headers=headers,
+                data=body,
+                cookies=cookies,
+                allow_redirects=False
+            ) as upstream_response:
+
+                # Читаем ответ
+                content = await upstream_response.read()
+
+                # Копируем заголовки ответа
+                response_headers = {}
+                for key, value in upstream_response.headers.items():
+                    key_lower = key.lower()
+
+                    # Пропускаем некоторые заголовки
+                    if key_lower in ['content-encoding', 'transfer-encoding', 'connection', 'keep-alive']:
+                        continue
+
+                    # Специальная обработка Set-Cookie для правильной пересылки
+                    if key_lower == 'set-cookie':
+                        logger.info(f"🍪 Backend set cookie: {value[:50]}...")
+
+                    response_headers[key] = value
+
+                # Добавляем CORS headers для локального proxy
+                response_headers.update({
+                    'Access-Control-Allow-Origin': self.local_url,
+                    'Access-Control-Allow-Credentials': 'true',
+                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With'
+                })
+
+                self.stats['total_responses'] += 1
+                self.stats['active_connections'] -= 1
+
+                logger.info(f"✅ Backend response: {upstream_response.status}")
+
+                return web.Response(
+                    body=content,
+                    status=upstream_response.status,
+                    headers=response_headers
+                )
+
+        except Exception as e:
+            self.stats['errors'] += 1
+            self.stats['active_connections'] -= 1
+            logger.error(f"❌ Backend proxy error: {e}")
+
+            return web.Response(
+                text=f"Backend proxy error: {str(e)}",
+                status=502
+            )
 
     async def _cleanup_pending_request(self, cache_key: str, delay: float = 0.1):
         """Очистка завершённого запроса из pending_requests"""
@@ -805,7 +922,8 @@ class ProxyManager:
             # Создаем прокси
             self.proxy = ZenzefiProxy()
             self.proxy.upstream_url = self.remote_url
-            self.proxy.local_url = f"https://127.0.0.1:{self.local_port}"
+            # ВАЖНО: local_url должен включать /api/v1/proxy для правильной перезаписи URL
+            self.proxy.local_url = f"https://127.0.0.1:{self.local_port}/api/v1/proxy"
 
             # Обновляем URL в ContentRewriter
             self.proxy.content_rewriter.set_urls(self.remote_url, self.proxy.local_url)

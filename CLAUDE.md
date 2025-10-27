@@ -77,6 +77,8 @@ The core proxy functionality (`core/proxy_manager.py`) has three main classes:
    - `handle_websocket()` - Bidirectional WebSocket proxying with size limits (10MB)
    - `fix_content()` - Rewrites URLs in HTML/CSS/JS with regex caching
    - `router()` - Routes between HTTP and WebSocket handlers based on Upgrade header
+   - `_proxy_to_backend()` - Proxies authentication endpoints to backend server (127.0.0.1:8000)
+   - `_serve_auth_page()` - Serves HTML authentication page with token input
    - **Performance features:**
      - LRU cache for static resources (CSS, JS, images, fonts)
      - Streaming for files >1MB to reduce memory usage
@@ -101,13 +103,62 @@ The core proxy functionality (`core/proxy_manager.py`) has three main classes:
    - `get_proxy_stats()` - Retrieves real-time performance statistics
 
 **Critical Details:**
-- The proxy rewrites all references to `https://zenzefi.melxiory.ru` → `https://127.0.0.1:61000` in responses, including WebSocket URLs (`wss://`)
+- The proxy rewrites all references to `https://zenzefi.melxiory.ru` → `https://127.0.0.1:61000/api/v1/proxy` in responses, including WebSocket URLs (`wss://`)
+- **local_url includes /api/v1/proxy prefix** - this is critical for proper URL rewriting and routing
+- The proxy **strips /api/v1/proxy/ prefix** from paths before forwarding to Zenzefi server (Zenzefi doesn't know about this internal routing prefix)
 - Static resources are cached in memory for faster repeated requests
 - Large files (>1MB) are streamed to avoid loading entirely into memory
 - Connection pool is reused across requests to reduce SSL handshake overhead
 - **Automatic compression** saves 50-80% bandwidth for text responses (HTML, CSS, JS, JSON)
 - **HTTP/2 ready** - TCPConnector configured to support HTTP/2 when available
 - Statistics collection is always active in background for monitoring
+
+### Authentication Architecture
+
+The application uses a **cookie-based authentication system** with integration to a backend server:
+
+**Architecture Flow:**
+1. **Browser** → Desktop Client Proxy (https://127.0.0.1:61000)
+2. **Desktop Client Proxy** → Backend Server (http://127.0.0.1:8000)
+3. **Backend Server** → Zenzefi Server (https://zenzefi.melxiory.ru)
+
+**Key Components:**
+
+1. **Access Token Generation** (Desktop Client)
+   - Desktop client generates encrypted access tokens
+   - Token is appended to URL: `https://127.0.0.1:61000/api/v1/proxy?token=...`
+   - Token is used for initial authentication only
+
+2. **Cookie Authentication** (Backend Server)
+   - Backend validates token and sets `zenzefi_access_token` cookie
+   - Cookie is httpOnly, secure, SameSite=Lax
+   - All subsequent requests authenticated via cookie
+   - Backend proxies requests to Zenzefi with proper authentication headers
+
+3. **Authentication Flow:**
+   ```
+   1. User clicks "Open in Browser" in Desktop Client
+   2. Browser opens https://127.0.0.1:61000/api/v1/proxy?token=xyz
+   3. Proxy serves HTML auth page (if no cookie present)
+   4. JavaScript sends token to /api/v1/proxy/authenticate
+   5. Request proxied to backend via _proxy_to_backend()
+   6. Backend validates token, sets cookie, returns success
+   7. Browser redirected to /api/v1/proxy/ (now with valid cookie)
+   8. All subsequent requests use cookie for authentication
+   ```
+
+4. **Infinite Redirect Prevention:**
+   - Proxy checks for `zenzefi_access_token` cookie before showing auth page
+   - If cookie exists, request is proxied to backend instead
+   - This prevents redirect loops when cookie is already set
+
+5. **Auth Endpoints Proxied to Backend:**
+   - `/api/v1/proxy/authenticate` - Token → Cookie exchange
+   - `/api/v1/proxy/status` - Check authentication status
+   - `/api/v1/proxy/logout` - Clear authentication cookie
+   - All handled by `_proxy_to_backend()` method
+
+**IMPORTANT:** The backend server must be running at `http://127.0.0.1:8000` for authentication to work. Start with: `poetry run uvicorn app.main:app --reload`
 
 ### Threading Model
 
