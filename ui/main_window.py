@@ -122,7 +122,6 @@ class MainWindow(QMainWindow):
         self.proxy_manager = proxy_manager
         self.proxy_thread = None
         self.current_status = {}
-        self.open_browser_after_start = False  # Флаг для открытия браузера после запуска
 
         self.setup_ui()
 
@@ -209,8 +208,8 @@ class MainWindow(QMainWindow):
         self.token_status_label = QLabel("Статус: ⚠️ Не установлен")
         auth_layout.addWidget(self.token_status_label)
 
-        # Статус cookie аутентификации
-        self.auth_status_label = QLabel("Cookie статус: ⚪ Не проверен")
+        # Статус backend сервера
+        self.auth_status_label = QLabel("Backend: ⚪ Не проверен")
         self.auth_status_label.setStyleSheet("color: #888888;")
         auth_layout.addWidget(self.auth_status_label)
 
@@ -219,7 +218,7 @@ class MainWindow(QMainWindow):
         self.save_token_btn = QPushButton("Сохранить")
         self.clear_token_btn = QPushButton("Очистить")
         self.toggle_token_visibility_btn = QPushButton("Показать токен")
-        self.check_auth_btn = QPushButton("Проверить статус")
+        self.check_auth_btn = QPushButton("Проверить Backend")
         self.logout_btn = QPushButton("🚪 Logout")
 
         self.save_token_btn.clicked.connect(self.save_token)
@@ -407,8 +406,8 @@ class MainWindow(QMainWindow):
             thread.daemon = True
             thread.start()
         except Exception as e:
-            logger.error(f"Ошибка при проверке статуса: {e}")
-            self.auth_status_label.setText("Cookie статус: ❌ Ошибка проверки")
+            logger.error(f"Ошибка при проверке backend: {e}")
+            self.auth_status_label.setText("Backend: ❌ Ошибка проверки")
             self.auth_status_label.setStyleSheet("color: #E4002B;")
 
     def _run_check_auth_status(self):
@@ -420,113 +419,70 @@ class MainWindow(QMainWindow):
             logger.error(f"Ошибка в _run_check_auth_status: {e}")
 
     async def check_auth_status(self):
-        """Проверить статус аутентификации"""
+        """Проверить доступность backend сервера (не cookie!)"""
         try:
-            from core.auth_manager import get_auth_manager
+            import aiohttp
+            import asyncio
 
-            remote_url = self.url_input.text().strip()
-            if not remote_url:
-                remote_url = self.config.get('proxy.remote_url', 'http://localhost:8000')
+            # Backend URL
+            backend_url = "http://127.0.0.1:8000"
 
-            auth_manager = get_auth_manager(backend_url=remote_url)
-            success, status_data = await auth_manager.check_status()
+            self.auth_status_label.setText("Backend: 🔄 Проверка...")
+            self.auth_status_label.setStyleSheet("color: #FFA500;")
 
-            if success and status_data:
-                logger.info(f"✅ Auth status checked: {status_data}")
-                self.update_auth_status_ui(status_data)
-            else:
-                logger.warning("⚠️ Authentication check failed")
-                self.auth_status_label.setText("Cookie статус: ❌ Не аутентифицирован")
+            try:
+                # Простая проверка доступности backend (без cookie)
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{backend_url}/health",  # health check endpoint
+                        timeout=aiohttp.ClientTimeout(total=5),
+                        ssl=False
+                    ) as response:
+                        if response.status == 200:
+                            logger.info("✅ Backend доступен")
+                            self.auth_status_label.setText("Backend: ✅ Доступен")
+                            self.auth_status_label.setStyleSheet("color: #00A438;")
+                        else:
+                            logger.warning(f"⚠️ Backend ответил с кодом {response.status}")
+                            self.auth_status_label.setText(f"Backend: ⚠️ Код {response.status}")
+                            self.auth_status_label.setStyleSheet("color: #FFA500;")
+
+            except aiohttp.ClientConnectorError:
+                logger.error("❌ Backend недоступен (не запущен?)")
+                self.auth_status_label.setText("Backend: ❌ Недоступен")
                 self.auth_status_label.setStyleSheet("color: #E4002B;")
+            except asyncio.TimeoutError:
+                logger.error("❌ Backend не отвечает (таймаут)")
+                self.auth_status_label.setText("Backend: ❌ Таймаут")
+                self.auth_status_label.setStyleSheet("color: #E4002B;")
+
         except Exception as e:
-            logger.error(f"Ошибка проверки статуса: {e}")
-            self.auth_status_label.setText("Cookie статус: ❌ Ошибка")
+            logger.error(f"Ошибка проверки backend: {e}")
+            self.auth_status_label.setText("Backend: ❌ Ошибка")
             self.auth_status_label.setStyleSheet("color: #E4002B;")
 
     def update_auth_status_ui(self, status_data):
-        """Обновить UI с информацией об аутентификации"""
-        try:
-            auth_via = status_data.get('authenticated_via', 'unknown')
-            time_remaining = status_data.get('time_remaining_seconds', 0)
-
-            hours = time_remaining // 3600
-            minutes = (time_remaining % 3600) // 60
-
-            self.auth_status_label.setText(
-                f"Cookie статус: ✅ Аутентифицирован ({auth_via}) | "
-                f"Осталось: {hours}ч {minutes}м"
-            )
-            self.auth_status_label.setStyleSheet("color: #00D4AA;")
-        except Exception as e:
-            logger.error(f"Ошибка обновления UI статуса: {e}")
+        """DEPRECATED: Больше не используется в новой архитектуре"""
+        # Cookie статус проверяется в браузере, не в desktop client
+        pass
 
     def on_logout_clicked(self):
         """Обработка нажатия кнопки logout"""
         try:
-            reply = QMessageBox.question(
+            # В новой архитектуре logout делается через браузер
+            QMessageBox.information(
                 self,
-                'Подтверждение выхода',
-                'Вы уверены, что хотите выйти? Это удалит cookie аутентификации.',
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
+                'Logout через браузер',
+                'Для выхода из системы:\n\n'
+                '1. Откройте браузер с прокси\n'
+                '2. Перейдите на https://127.0.0.1:61000/api/v1/proxy/logout\n'
+                '3. Или просто закройте браузер\n\n'
+                'Cookie хранится в браузере, не в desktop client.',
+                QMessageBox.StandardButton.Ok
             )
-
-            if reply == QMessageBox.StandardButton.Yes:
-                # Запускаем logout в отдельном потоке
-                import threading
-                thread = threading.Thread(target=self._run_perform_logout)
-                thread.daemon = True
-                thread.start()
+            logger.info("ℹ️ Показано сообщение о logout через браузер")
         except Exception as e:
-            logger.error(f"Ошибка при logout: {e}")
-
-    def _run_perform_logout(self):
-        """Запускает perform_logout в новом event loop"""
-        import asyncio
-        try:
-            asyncio.run(self.perform_logout())
-        except Exception as e:
-            logger.error(f"Ошибка в _run_perform_logout: {e}")
-
-    async def perform_logout(self):
-        """Выполнить logout"""
-        try:
-            from core.auth_manager import get_auth_manager
-
-            remote_url = self.url_input.text().strip()
-            if not remote_url:
-                remote_url = self.config.get('proxy.remote_url', 'http://localhost:8000')
-
-            auth_manager = get_auth_manager(backend_url=remote_url)
-            success = await auth_manager.logout()
-
-            if success:
-                logger.info("✅ Logged out successfully")
-
-                # Обновить UI
-                self.auth_status_label.setText("Cookie статус: ⚪ Вышли из системы")
-                self.auth_status_label.setStyleSheet("color: #888888;")
-
-                QMessageBox.information(
-                    self,
-                    "Выход выполнен",
-                    "Вы успешно вышли из системы."
-                )
-            else:
-                logger.error("❌ Logout failed")
-
-                QMessageBox.warning(
-                    self,
-                    "Ошибка выхода",
-                    "Не удалось выйти. Попробуйте снова."
-                )
-        except Exception as e:
-            logger.error(f"Ошибка logout: {e}")
-            QMessageBox.critical(
-                self,
-                "Ошибка",
-                f"Произошла ошибка: {e}"
-            )
+            logger.error(f"Ошибка при показе сообщения о logout: {e}")
 
     def start_proxy(self):
         """Запускает прокси"""
@@ -552,7 +508,7 @@ class MainWindow(QMainWindow):
             return
 
         self.save_config()
-        self.open_browser_after_start = True  # Устанавливаем флаг для открытия браузера
+        # Не открываем браузер автоматически - пользователь откроет сам
         self.start_proxy_thread("start", remote_url)
 
     def stop_proxy(self):
@@ -598,46 +554,9 @@ class MainWindow(QMainWindow):
         try:
             self.current_status = status
             self.update_status_display()
-
-            # Открываем браузер на auth странице если прокси только что запустился
-            if self.open_browser_after_start and status.get('running', False):
-                self.open_browser_after_start = False
-                self.open_auth_page()
+            # Браузер пользователь откроет вручную - не открываем автоматически
         except Exception as e:
             logger.error(f"Ошибка обновления статуса: {e}")
-
-    def open_auth_page(self):
-        """Открывает браузер на странице аутентификации"""
-        try:
-            import webbrowser
-
-            access_token = self.config.get_access_token()
-            if not access_token:
-                logger.warning("⚠️ Не могу открыть auth страницу: токен не найден")
-                return
-
-            local_port = self.config.get('proxy.local_port', 61000)
-            auth_url = f"https://127.0.0.1:{local_port}/api/v1/proxy?token={access_token}"
-
-            logger.info(f"🌐 Открываем браузер: {auth_url}")
-            webbrowser.open(auth_url)
-
-            # Показываем сообщение пользователю
-            QMessageBox.information(
-                self,
-                "Аутентификация",
-                "Браузер открыт для аутентификации.\n\n"
-                "После успешной аутентификации вы будете перенаправлены на приложение.\n"
-                "Cookie будет автоматически установлен для всех последующих запросов."
-            )
-        except Exception as e:
-            logger.error(f"Ошибка открытия браузера: {e}")
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                f"Не удалось открыть браузер: {e}\n\n"
-                f"Откройте вручную: https://127.0.0.1:{self.config.get('proxy.local_port', 61000)}/api/v1/proxy"
-            )
 
     def update_status(self):
         """Обновляет статус"""

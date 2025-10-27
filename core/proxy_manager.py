@@ -4,85 +4,54 @@ import ssl
 import logging
 import time
 import threading
-from aiohttp import web, ClientSession, WSMsgType
-import aiohttp
+import sys
+from aiohttp import web, ClientSession, TCPConnector, ClientTimeout, ClientConnectorError, ServerTimeoutError
 from utils.process_manager import get_process_manager
 from utils.port_utils import check_port_availability, get_process_using_port
 from core.config_manager import get_app_data_dir
-from core.proxy import CacheManager, ContentRewriter
-from core.auth_manager import get_auth_manager
-import sys
-import gzip
-import zlib
 
 logger = logging.getLogger(__name__)
 
 
-# Алиас для обратной совместимости
-LRUCache = CacheManager
-
-
 class ZenzefiProxy:
-    # Размер для streaming (1MB)
-    _STREAMING_THRESHOLD = 1024 * 1024
-
     def __init__(self):
         self.upstream_url = "https://zenzefi.melxiory.ru"
         # ВАЖНО: local_url должен включать /api/v1/proxy для правильной перезаписи URL
         self.local_url = "https://127.0.0.1:61000/api/v1/proxy"
-        self.ssl_context = None
-
-        # Кэш для статических ресурсов
-        self.cache = LRUCache(maxsize=100)
-
-        # ContentRewriter для перезаписи URL
-        self.content_rewriter = ContentRewriter(
-            upstream_url=self.upstream_url,
-            local_url=self.local_url,
-            cache_manager=self.cache
-        )
 
         # Connection pool для переиспользования соединений
         self.connector = None
         self.session = None
 
-        # Семафор для ограничения одновременных соединений
+        # Семафор для ограничения одновременных соединений к backend
         self.connection_semaphore = asyncio.Semaphore(50)
-
-        # Request deduplication - словарь активных запросов
-        self.pending_requests = {}  # {request_key: (asyncio.Event, result_holder)}
 
         # Статистика производительности
         self.stats = {
             'total_requests': 0,
             'total_responses': 0,
             'active_connections': 0,
-            'compressed_responses': 0,
-            'compression_saved_bytes': 0,
-            'streamed_responses': 0,
-            'errors': 0,
-            'websocket_connections': 0,
-            'deduplicated_requests': 0
+            'errors': 0
         }
 
     async def initialize(self):
-        """Инициализация connection pool с оптимизацией для keep-alive"""
+        """Инициализация connection pool для backend"""
         if self.connector is None:
-            # Настройка connection pooling с максимальной оптимизацией keep-alive
-            self.connector = aiohttp.TCPConnector(
-                ssl=False,
+            # Настройка connection pooling для backend (127.0.0.1:8000)
+            self.connector = TCPConnector(
+                ssl=False,  # Backend на localhost без SSL
                 limit=100,  # Максимум 100 одновременных соединений
-                limit_per_host=30,  # Максимум 30 на хост (оптимально для HTTP/1.1)
+                limit_per_host=50,  # Максимум 50 на хост (backend)
                 ttl_dns_cache=300,  # DNS кэш на 5 минут
                 keepalive_timeout=60,  # Keep-alive 60 секунд
-                force_close=False,  # НЕ закрывать соединения после каждого запроса (критично!)
+                force_close=False,  # Переиспользуем соединения
                 enable_cleanup_closed=True  # Автоочистка закрытых соединений
             )
 
         if self.session is None:
             self.session = ClientSession(
                 connector=self.connector,
-                timeout=aiohttp.ClientTimeout(total=30, connect=10)
+                timeout=ClientTimeout(total=30, connect=5)
             )
 
     async def cleanup(self):
@@ -95,139 +64,41 @@ class ZenzefiProxy:
             self.connector = None
 
 
-    def _is_compressible(self, content_type: str) -> bool:
-        """Проверка, можно ли сжимать контент"""
-        compressible_types = [
-            'text/', 'application/json', 'application/javascript',
-            'application/xml', 'application/x-javascript'
-        ]
-        return any(ct in content_type.lower() for ct in compressible_types)
-
-    def _compress_content(self, content: bytes, accept_encoding: str) -> tuple[bytes, str]:
-        """Сжимает контент используя gzip или deflate
-
-        Возвращает (сжатый_контент, encoding)
-        """
-        # Не сжимаем если контент слишком маленький (< 1KB)
-        if len(content) < 1024:
-            return content, None
-
-        # Определяем предпочитаемый метод сжатия
-        accept_encoding_lower = accept_encoding.lower()
-
-        # Предпочитаем gzip как наиболее распространенный
-        if 'gzip' in accept_encoding_lower:
-            try:
-                compressed = gzip.compress(content, compresslevel=6)
-                # Проверяем что сжатие дало выгоду
-                if len(compressed) < len(content):
-                    logger.debug(f"🗜️ gzip: {len(content)} → {len(compressed)} bytes ({len(compressed)/len(content)*100:.1f}%)")
-                    return compressed, 'gzip'
-            except Exception as e:
-                logger.warning(f"Ошибка gzip сжатия: {e}")
-
-        # Fallback на deflate
-        elif 'deflate' in accept_encoding_lower:
-            try:
-                compressed = zlib.compress(content, level=6)
-                if len(compressed) < len(content):
-                    logger.debug(f"🗜️ deflate: {len(content)} → {len(compressed)} bytes ({len(compressed)/len(content)*100:.1f}%)")
-                    return compressed, 'deflate'
-            except Exception as e:
-                logger.warning(f"Ошибка deflate сжатия: {e}")
-
-        # Не удалось сжать или сжатие не поддерживается
-        return content, None
-
     async def handle_http(self, request):
-        """Обработка HTTP/HTTPS запросов с кэшированием и streaming"""
+        """Обработка HTTP/HTTPS запросов через backend proxy"""
         self.stats['total_requests'] += 1
         self.stats['active_connections'] += 1
 
         try:
-            # Специальная обработка для auth страницы
-            # Показываем HTML auth страницу только если:
-            # 1. Есть token в query параметрах (прямая ссылка из Desktop Client)
-            # 2. ИЛИ браузер запрашивает HTML (Accept: text/html) на корневой путь
-            # 3. НО только если cookie НЕ установлена (иначе бесконечный редирект!)
-            if request.path == '/api/v1/proxy' or request.path == '/api/v1/proxy/':
-                # Проверяем наличие cookie аутентификации
-                has_cookie = 'zenzefi_access_token' in request.cookies
-
-                # Если cookie уже есть - проксируем на backend, НЕ показываем auth страницу
-                if has_cookie:
-                    logger.debug("🍪 Cookie found, proxying to backend instead of showing auth page")
-                    # Продолжаем обычную обработку (будет проксировано на backend)
-                else:
-                    # Проверяем наличие token в query
-                    has_token = 'token' in request.query
-
-                    # Проверяем Accept header
-                    accept_header = request.headers.get('Accept', '')
-                    wants_html = 'text/html' in accept_header
-
-                    # Показываем auth страницу только если есть token ИЛИ браузер просит HTML
-                    if has_token or (wants_html and not 'application/json' in accept_header):
-                        self.stats['active_connections'] -= 1
-                        return await self._serve_auth_page(request)
-
-                # Иначе проксируем запрос на backend (для API клиентов, ожидающих JSON)
-
-            # ВСЕ запросы теперь идут через backend!
-            # Backend валидирует cookie и проксирует на Zenzefi с правильной аутентификацией
-            # Это нужно для cookie-based auth архитектуры
+            # ВСЕ запросы идут через backend!
+            # Backend отвечает за:
+            # - Аутентификацию (включая показ auth страницы если нужно)
+            # - Валидацию cookie
+            # - Проксирование на Zenzefi
+            # - Content rewriting
             return await self._proxy_to_backend(request)
 
-            # Проверяем кэш для статических ресурсов
-            cache_key = self.cache.generate_key(request.path, request.query_string)
+        except Exception as e:
+            self.stats['errors'] += 1
+            self.stats['active_connections'] -= 1
+            logger.error(f"❌ HTTP Error: {e}")
+            return web.Response(text=f"Proxy error: {str(e)}", status=500)
 
-            # Пытаемся получить из кэша (только для GET запросов)
-            if request.method == 'GET':
-                cached = self.cache.get(cache_key)
-                if cached:
-                    content, headers, status = cached
-                    logger.debug(f"✅ Cache HIT: {request.path}")
-                    self.stats['total_responses'] += 1
-                    self.stats['active_connections'] -= 1
-                    return web.Response(body=content, status=status, headers=headers)
+    async def _proxy_to_backend(self, request):
+        """
+        Проксирует ВСЕ запросы на backend (127.0.0.1:8000)
 
-                # Request Deduplication: проверяем, есть ли уже активный запрос
-                if cache_key in self.pending_requests:
-                    logger.debug(f"🔄 Request deduplication: waiting for {request.path}")
-                    self.stats['deduplicated_requests'] += 1
-                    self.stats['active_connections'] -= 1
+        Backend отвечает за:
+        - Валидацию cookie аутентификации
+        - Проксирование на Zenzefi Server
+        - Content rewriting
+        """
+        backend_url = "http://127.0.0.1:8000"
 
-                    # Ждём результат активного запроса
-                    event, result_holder = self.pending_requests[cache_key]
-                    await event.wait()  # Ждём пока первый запрос завершится
-
-                    self.stats['total_responses'] += 1
-
-                    # Проверяем результат и создаём НОВЫЙ Response объект
-                    if 'body' in result_holder:
-                        # Создаём новый Response с переиспользованием body
-                        return web.Response(
-                            body=result_holder['body'],
-                            status=result_holder['status'],
-                            headers=result_holder['headers']
-                        )
-                    elif 'error' in result_holder:
-                        # Первый запрос упал, делаем свой
-                        logger.debug(f"⚠️ Original request failed: {result_holder['error']}")
-                        # Продолжаем выполнение своего запроса
-                    else:
-                        # Странная ситуация, делаем свой запрос
-                        logger.warning("⚠️ No result in holder, making new request")
-
-            # Создаём Event для дедупликации (только для GET)
-            dedup_event = None
-            result_holder = {}
-            if request.method == 'GET' and cache_key not in self.pending_requests:
-                dedup_event = asyncio.Event()
-                self.pending_requests[cache_key] = (dedup_event, result_holder)
-
-            # Используем семафор для ограничения одновременных соединений
-            async with self.connection_semaphore:
+        # Используем семафор для ограничения одновременных соединений
+        async with self.connection_semaphore:
+            try:
+                # Читаем тело запроса
                 body = await request.read()
 
                 # Подготовка заголовков
@@ -237,80 +108,47 @@ class ZenzefiProxy:
                     if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
                         headers[key] = value
 
-                header_host = self.upstream_url.replace('https://', '').replace('http://', '')
-                headers.update({
-                    "Host": f"{header_host}",
-                    "X-Real-IP": request.remote,
-                    "X-Forwarded-For": request.remote,
-                    "X-Forwarded-Proto": "https"
-                })
-
-                # Убираем префикс /api/v1/proxy/ из пути перед отправкой на Zenzefi
-                # Zenzefi server не знает про этот префикс (это внутренний путь backend)
-                clean_path = request.path_qs
-                if clean_path.startswith('/api/v1/proxy/'):
-                    clean_path = clean_path[len('/api/v1/proxy/'):]
-                elif clean_path.startswith('/api/v1/proxy'):
-                    clean_path = clean_path[len('/api/v1/proxy'):]
-
-                # Добавляем ведущий слеш если его нет
-                if not clean_path.startswith('/'):
-                    clean_path = '/' + clean_path
-
-                upstream_url = f"{self.upstream_url}{clean_path}"
-
-                # Копируем cookies от клиента для отправки на backend
-                # Это критично для cookie-based аутентификации!
+                # Копируем cookies от браузера
                 cookies = {}
                 for name, value in request.cookies.items():
                     cookies[name] = value
-                    logger.debug(f"🍪 Forwarding cookie: {name}")
+                    logger.debug(f"🍪 Forwarding cookie to backend: {name}")
+
+                # Формируем URL на backend
+                upstream_url = f"{backend_url}{request.path_qs}"
+                logger.debug(f"🔐 Proxying to backend: {upstream_url}")
 
                 # Используем переиспользуемую сессию
                 await self.initialize()
 
                 async with self.session.request(
-                        method=request.method,
-                        url=upstream_url,
-                        headers=headers,
-                        data=body,
-                        cookies=cookies,  # КРИТИЧНО! Пересылаем cookies на backend
-                        allow_redirects=False
+                    method=request.method,
+                    url=upstream_url,
+                    headers=headers,
+                    data=body,
+                    cookies=cookies,
+                    allow_redirects=False
                 ) as upstream_response:
 
-                    # Обработка ошибки 401 (Unauthorized)
-                    if upstream_response.status == 401:
-                        logger.error("❌ Unauthorized: Cookie аутентификации недействителен или истёк")
-                        self.stats['errors'] += 1
-                        self.stats['total_responses'] += 1
-                        self.stats['active_connections'] -= 1
+                    # Читаем ответ
+                    content = await upstream_response.read()
 
-                        return web.Response(
-                            text="⚠️ Сессия аутентификации истекла.\n\n"
-                                 "Пожалуйста, перезапустите прокси для повторной аутентификации.",
-                            status=401,
-                            content_type="text/plain"
-                        )
-
+                    # Копируем заголовки ответа
                     response_headers = {}
                     for key, value in upstream_response.headers.items():
                         key_lower = key.lower()
 
+                        # Пропускаем некоторые заголовки
                         if key_lower in ['content-encoding', 'transfer-encoding', 'connection', 'keep-alive']:
                             continue
 
-                        if key_lower == 'access-control-allow-origin':
-                            value = self.local_url
-
-                        if key_lower == 'location':
-                            value = value.replace(self.upstream_url, self.local_url)
-
                         # Специальная обработка Set-Cookie для правильной пересылки
                         if key_lower == 'set-cookie':
-                            logger.debug(f"🍪 Forwarding Set-Cookie from backend: {value[:50]}...")
+                            logger.info(f"🍪 Backend set cookie: {value[:50]}...")
 
                         response_headers[key] = value
 
+                    # Добавляем CORS headers для локального proxy
                     response_headers.update({
                         'Access-Control-Allow-Origin': self.local_url,
                         'Access-Control-Allow-Credentials': 'true',
@@ -318,478 +156,74 @@ class ZenzefiProxy:
                         'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With'
                     })
 
-                    content_type = upstream_response.headers.get('content-type', '').lower()
-                    content_length = int(upstream_response.headers.get('content-length', 0))
-
-                    # Streaming для больших файлов (>1MB)
-                    if content_length > self._STREAMING_THRESHOLD:
-                        logger.debug(f"🌊 Streaming: {request.path} ({content_length} bytes)")
-                        self.stats['streamed_responses'] += 1
-
-                        response = web.StreamResponse(
-                            status=upstream_response.status,
-                            headers=response_headers
-                        )
-                        await response.prepare(request)
-
-                        async for chunk in upstream_response.content.iter_chunked(8192):
-                            await response.write(chunk)
-
-                        await response.write_eof()
-                        self.stats['total_responses'] += 1
-                        self.stats['active_connections'] -= 1
-                        return response
-
-                    # Обычная загрузка для небольших файлов
-                    content = await upstream_response.read()
-
-                    # Обработка текстового контента
-                    if any(x in content_type for x in ['text/', 'javascript', 'json']):
-                        try:
-                            content_str = content.decode('utf-8')
-                            content_str = self.content_rewriter.rewrite(content_str, content_type)
-                            content = content_str.encode('utf-8')
-                        except:
-                            pass
-
-                    # Применяем сжатие если клиент поддерживает и контент подходит
-                    original_size = len(content)
-                    accept_encoding = request.headers.get('Accept-Encoding', '')
-                    if accept_encoding and self._is_compressible(content_type):
-                        compressed_content, encoding = self._compress_content(content, accept_encoding)
-                        if encoding:
-                            saved_bytes = original_size - len(compressed_content)
-                            self.stats['compressed_responses'] += 1
-                            self.stats['compression_saved_bytes'] += saved_bytes
-                            content = compressed_content
-                            response_headers['Content-Encoding'] = encoding
-                            response_headers['Content-Length'] = str(len(content))
-
-                    # Добавляем явные keep-alive заголовки
-                    response_headers['Connection'] = 'keep-alive'
-                    response_headers['Keep-Alive'] = 'timeout=60, max=100'
-
-                    # Кэшируем статические ресурсы
-                    if request.method == 'GET' and self.cache.is_cacheable(request.path, content_type):
-                        self.cache.put(cache_key, (content, dict(response_headers), upstream_response.status))
-                        logger.debug(f"💾 Cached: {request.path}")
-
                     self.stats['total_responses'] += 1
                     self.stats['active_connections'] -= 1
 
-                    # Сохраняем данные для дедупликации ПЕРЕД созданием Response
-                    if dedup_event:
-                        result_holder['body'] = content
-                        result_holder['status'] = upstream_response.status
-                        result_holder['headers'] = dict(response_headers)
-                        dedup_event.set()  # Уведомляем ждущие запросы
-                        # Очищаем через небольшую задержку
-                        asyncio.create_task(self._cleanup_pending_request(cache_key))
+                    logger.debug(f"✅ Backend response: {upstream_response.status}")
 
-                    # Создаём Response для текущего запроса
                     return web.Response(
                         body=content,
                         status=upstream_response.status,
                         headers=response_headers
                     )
 
-        except Exception as e:
-            self.stats['errors'] += 1
-            self.stats['active_connections'] -= 1
-            logger.error(f"❌ HTTP Error: {e}")
-
-            # Сохраняем ошибку для дедупликации
-            if 'dedup_event' in locals() and dedup_event:
-                result_holder['error'] = str(e)
-                dedup_event.set()
-                asyncio.create_task(self._cleanup_pending_request(cache_key))
-
-            return web.Response(text=f"Proxy error: {str(e)}", status=500)
-
-    async def _serve_auth_page(self, request):
-        """
-        Служебная страница для первоначальной аутентификации
-
-        Маршрутизация:
-        - /api/v1/proxy?token=... → HTML auth страница (этот метод)
-        - /api/v1/proxy/ (Accept: text/html) → HTML auth страница (этот метод)
-        - /api/v1/proxy/ (Accept: application/json) → проксируется на backend
-
-        Процесс аутентификации:
-        1. Читает токен из query параметров или конфига
-        2. JavaScript отправляет токен на backend /authenticate endpoint
-        3. Backend устанавливает HTTP-only secure cookie
-        4. Перенаправляет на реальное приложение
-        5. Все последующие запросы автоматически содержат cookie
-        """
-
-        # Проверяем есть ли уже токен в query параметрах
-        query = request.query
-        token = query.get('token', '')
-
-        # Если токена нет в query, попробуем получить из конфига
-        if not token:
-            from core.config_manager import get_config
-            config = get_config()
-            token = config.get_access_token() or ''
-
-        html = f"""
-        <!DOCTYPE html>
-        <html lang="ru">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Zenzefi Authentication</title>
-            <style>
-                body {{
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    min-height: 100vh;
-                    margin: 0;
-                    color: white;
-                }}
-                .container {{
-                    background: rgba(255, 255, 255, 0.1);
-                    backdrop-filter: blur(10px);
-                    padding: 40px;
-                    border-radius: 20px;
-                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-                    text-align: center;
-                    max-width: 500px;
-                }}
-                .spinner {{
-                    border: 4px solid rgba(255, 255, 255, 0.3);
-                    border-radius: 50%;
-                    border-top: 4px solid white;
-                    width: 50px;
-                    height: 50px;
-                    animation: spin 1s linear infinite;
-                    margin: 20px auto;
-                }}
-                @keyframes spin {{
-                    0% {{ transform: rotate(0deg); }}
-                    100% {{ transform: rotate(360deg); }}
-                }}
-                .message {{
-                    font-size: 18px;
-                    margin: 20px 0;
-                }}
-                .error {{
-                    background: rgba(220, 38, 38, 0.8);
-                    padding: 15px;
-                    border-radius: 10px;
-                    margin-top: 20px;
-                }}
-                .success {{
-                    background: rgba(34, 197, 94, 0.8);
-                    padding: 15px;
-                    border-radius: 10px;
-                    margin-top: 20px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🔐 Zenzefi Authentication</h1>
-                <div class="spinner" id="spinner"></div>
-                <div class="message" id="message">Authenticating...</div>
-            </div>
-
-            <script>
-                // Используем текущий origin (локальный proxy) вместо прямого вызова backend
-                const token = '{token}' || sessionStorage.getItem('zenzefi_token');
-
-                async function authenticate() {{
-                    const spinner = document.getElementById('spinner');
-                    const message = document.getElementById('message');
-
-                    if (!token) {{
-                        spinner.style.display = 'none';
-                        message.innerHTML = '<div class="error">❌ Токен не найден!<br>Пожалуйста, введите токен в приложении.</div>';
-                        return;
-                    }}
-
-                    try {{
-                        // Отправляем токен на backend через локальный proxy (относительный URL)
-                        const response = await fetch('/api/v1/proxy/authenticate', {{
-                            method: 'POST',
-                            headers: {{
-                                'Content-Type': 'application/json',
-                            }},
-                            body: JSON.stringify({{ token: token }}),
-                            credentials: 'include'  // Важно для cookie
-                        }});
-
-                        if (response.ok) {{
-                            const data = await response.json();
-
-                            spinner.style.display = 'none';
-                            message.innerHTML = `
-                                <div class="success">
-                                    ✅ Аутентификация успешна!<br>
-                                    <small>User ID: ${{data.user_id}}</small><br>
-                                    <small>Истекает: ${{data.expires_at ? new Date(data.expires_at).toLocaleString() : 'Не активирован'}}</small><br>
-                                    <br>
-                                    Перенаправление...
-                                </div>
-                            `;
-
-                            // Перенаправляем на проксированное приложение через локальный proxy
-                            setTimeout(() => {{
-                                window.location.href = '/api/v1/proxy/';
-                            }}, 2000);
-
-                        }} else {{
-                            const errorData = await response.json();
-
-                            spinner.style.display = 'none';
-                            message.innerHTML = `
-                                <div class="error">
-                                    ❌ Ошибка аутентификации!<br>
-                                    <small>${{errorData.detail || 'Unknown error'}}</small>
-                                </div>
-                            `;
-                        }}
-
-                    }} catch (error) {{
-                        spinner.style.display = 'none';
-                        message.innerHTML = `
-                            <div class="error">
-                                ❌ Ошибка сети!<br>
-                                <small>${{error.message}}</small><br>
-                                <small>Backend доступен на <code>${{backendUrl}}</code>?</small><br>
-                                <small>Убедитесь, что backend запущен (poetry run uvicorn app.main:app --reload)</small>
-                            </div>
-                        `;
-                        console.error('Authentication error:', error);
-                    }}
-                }}
-
-                // Запускаем аутентификацию при загрузке
-                authenticate();
-            </script>
-        </body>
-        </html>
-        """
-
-        return web.Response(
-            text=html,
-            content_type='text/html',
-            headers={
-                'Cache-Control': 'no-store, no-cache, must-revalidate',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            }
-        )
-
-    async def _proxy_to_backend(self, request):
-        """
-        Проксирует auth endpoints на backend (127.0.0.1:8000)
-
-        Этот метод обрабатывает:
-        - /api/v1/proxy/authenticate
-        - /api/v1/proxy/status
-        - /api/v1/proxy/logout
-        """
-        backend_url = "http://127.0.0.1:8000"
-
-        try:
-            # Читаем тело запроса
-            body = await request.read()
-
-            # Подготовка заголовков
-            headers = {}
-            for key, value in request.headers.items():
-                key_lower = key.lower()
-                if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
-                    headers[key] = value
-
-            # Копируем cookies от браузера
-            cookies = {}
-            for name, value in request.cookies.items():
-                cookies[name] = value
-                logger.debug(f"🍪 Forwarding cookie to backend: {name}")
-
-            # Формируем URL на backend
-            upstream_url = f"{backend_url}{request.path_qs}"
-            logger.info(f"🔐 Proxying auth request to backend: {upstream_url}")
-
-            # Используем переиспользуемую сессию
-            await self.initialize()
-
-            async with self.session.request(
-                method=request.method,
-                url=upstream_url,
-                headers=headers,
-                data=body,
-                cookies=cookies,
-                allow_redirects=False
-            ) as upstream_response:
-
-                # Читаем ответ
-                content = await upstream_response.read()
-
-                # Копируем заголовки ответа
-                response_headers = {}
-                for key, value in upstream_response.headers.items():
-                    key_lower = key.lower()
-
-                    # Пропускаем некоторые заголовки
-                    if key_lower in ['content-encoding', 'transfer-encoding', 'connection', 'keep-alive']:
-                        continue
-
-                    # Специальная обработка Set-Cookie для правильной пересылки
-                    if key_lower == 'set-cookie':
-                        logger.info(f"🍪 Backend set cookie: {value[:50]}...")
-
-                    response_headers[key] = value
-
-                # Добавляем CORS headers для локального proxy
-                response_headers.update({
-                    'Access-Control-Allow-Origin': self.local_url,
-                    'Access-Control-Allow-Credentials': 'true',
-                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With'
-                })
-
-                self.stats['total_responses'] += 1
+            except ClientConnectorError as e:
+                self.stats['errors'] += 1
                 self.stats['active_connections'] -= 1
-
-                logger.info(f"✅ Backend response: {upstream_response.status}")
+                logger.error(f"❌ Backend недоступен: {e}")
 
                 return web.Response(
-                    body=content,
-                    status=upstream_response.status,
-                    headers=response_headers
+                    text=(
+                        "❌ Backend сервер недоступен!\n\n"
+                        "Пожалуйста, запустите backend сервер:\n"
+                        "poetry run uvicorn app.main:app --reload\n\n"
+                        f"Детали: {str(e)}"
+                    ),
+                    status=502,
+                    content_type="text/plain; charset=utf-8"
                 )
 
-        except Exception as e:
-            self.stats['errors'] += 1
-            self.stats['active_connections'] -= 1
-            logger.error(f"❌ Backend proxy error: {e}")
+            except ServerTimeoutError as e:
+                self.stats['errors'] += 1
+                self.stats['active_connections'] -= 1
+                logger.error(f"❌ Таймаут соединения с backend: {e}")
 
-            return web.Response(
-                text=f"Backend proxy error: {str(e)}",
-                status=502
-            )
+                return web.Response(
+                    text=(
+                        "❌ Таймаут соединения с backend сервером!\n\n"
+                        "Backend слишком долго отвечает. Проверьте:\n"
+                        "- Backend сервер запущен и отвечает\n"
+                        "- Нет проблем с сетью\n\n"
+                        f"Детали: {str(e)}"
+                    ),
+                    status=504,
+                    content_type="text/plain; charset=utf-8"
+                )
 
-    async def _cleanup_pending_request(self, cache_key: str, delay: float = 0.1):
-        """Очистка завершённого запроса из pending_requests"""
-        await asyncio.sleep(delay)
-        if cache_key in self.pending_requests:
-            del self.pending_requests[cache_key]
-            logger.debug(f"🧹 Cleaned up pending request: {cache_key[:16]}...")
+            except Exception as e:
+                self.stats['errors'] += 1
+                self.stats['active_connections'] -= 1
+                logger.error(f"❌ Ошибка проксирования на backend: {e}", exc_info=True)
 
-    async def handle_websocket(self, request):
-        """Обработка WebSocket соединений с ограничением"""
-        ws_local = web.WebSocketResponse(max_msg_size=10 * 1024 * 1024)  # 10MB лимит
-        await ws_local.prepare(request)
-
-        logger.debug(f"🔌 WebSocket: {request.path}")
-
-        try:
-            async with self.connection_semaphore:
-                upstream_ws_url = f"wss://zenzefi.melxiory.ru{request.path_qs}"
-
-                headers = {
-                    "Host": "zenzefi.melxiory.ru",
-                    "Origin": self.upstream_url,
-                    "X-Real-IP": request.remote,
-                    "X-Forwarded-For": request.remote
-                }
-
-                if 'Cookie' in request.headers:
-                    headers['Cookie'] = request.headers['Cookie']
-                if 'Authorization' in request.headers:
-                    headers['Authorization'] = request.headers['Authorization']
-
-                for key in ['User-Agent', 'Accept', 'Accept-Language', 'Sec-WebSocket-Protocol']:
-                    if key in request.headers:
-                        headers[key] = request.headers[key]
-
-                cookie_jar = aiohttp.CookieJar()
-                for name, value in request.cookies.items():
-                    cookie_jar.update_cookies({name: value})
-
-                await self.initialize()
-
-                async with self.session.ws_connect(
-                        upstream_ws_url,
-                        headers=headers,
-                        ssl=False,
-                        max_msg_size=10 * 1024 * 1024
-                ) as ws_upstream:
-
-                    async def forward_to_upstream():
-                        async for msg in ws_local:
-                            if msg.type == WSMsgType.TEXT:
-                                await ws_upstream.send_str(msg.data)
-                            elif msg.type == WSMsgType.BINARY:
-                                await ws_upstream.send_bytes(msg.data)
-                            elif msg.type == WSMsgType.CLOSE:
-                                await ws_upstream.close()
-                                break
-
-                    async def forward_to_local():
-                        async for msg in ws_upstream:
-                            if msg.type == WSMsgType.TEXT:
-                                await ws_local.send_str(msg.data)
-                            elif msg.type == WSMsgType.BINARY:
-                                await ws_local.send_bytes(msg.data)
-                            elif msg.type == WSMsgType.CLOSE:
-                                await ws_local.close()
-                                break
-
-                    await asyncio.gather(
-                        forward_to_upstream(),
-                        forward_to_local(),
-                        return_exceptions=True
-                    )
-
-        except Exception as e:
-            logger.error(f"❌ WebSocket Error: {e}")
-        finally:
-            if not ws_local.closed:
-                await ws_local.close()
-
-        return ws_local
+                return web.Response(
+                    text=f"❌ Ошибка проксирования:\n\n{str(e)}",
+                    status=502,
+                    content_type="text/plain; charset=utf-8"
+                )
 
     async def router(self, request):
-        """Маршрутизация между HTTP и WebSocket"""
-        if request.headers.get('Upgrade', '').lower() == 'websocket':
-            return await self.handle_websocket(request)
-        else:
-            return await self.handle_http(request)
-
-    def get_cache_stats(self):
-        """Получить статистику кэша"""
-        return self.cache.get_stats()
+        """Маршрутизация всех запросов через backend proxy"""
+        # Все запросы (HTTP/HTTPS) идут через handle_http → backend
+        # Backend отвечает за валидацию, проксирование и content rewriting
+        return await self.handle_http(request)
 
     def get_full_stats(self):
         """Получить полную статистику прокси"""
-        cache_stats = self.cache.get_stats()
-
-        # Подсчитываем коэффициент сжатия
-        compression_ratio = 0
-        if self.stats['compressed_responses'] > 0:
-            avg_saved = self.stats['compression_saved_bytes'] / self.stats['compressed_responses']
-            compression_ratio = f"{avg_saved:.0f}"
-
         return {
             'requests': self.stats['total_requests'],
             'responses': self.stats['total_responses'],
             'active': self.stats['active_connections'],
-            'errors': self.stats['errors'],
-            'compressed': self.stats['compressed_responses'],
-            'compression_saved': f"{self.stats['compression_saved_bytes'] / 1024:.1f} KB",
-            'compression_ratio': compression_ratio,
-            'streamed': self.stats['streamed_responses'],
-            'websockets': self.stats['websocket_connections'],
-            'deduplicated': self.stats['deduplicated_requests'],
-            'cache': cache_stats
+            'errors': self.stats['errors']
         }
 
 
@@ -925,9 +359,6 @@ class ProxyManager:
             # ВАЖНО: local_url должен включать /api/v1/proxy для правильной перезаписи URL
             self.proxy.local_url = f"https://127.0.0.1:{self.local_port}/api/v1/proxy"
 
-            # Обновляем URL в ContentRewriter
-            self.proxy.content_rewriter.set_urls(self.remote_url, self.proxy.local_url)
-
             # Инициализируем connection pool
             await self.proxy.initialize()
 
@@ -976,10 +407,10 @@ class ProxyManager:
             if self.thread and self.thread.is_alive():
                 self.thread.join(timeout=5)
 
-            # Логируем статистику кэша перед остановкой
+            # Логируем статистику перед остановкой
             if self.proxy:
-                stats = self.proxy.get_cache_stats()
-                logger.info(f"📊 Статистика кэша: {stats}")
+                stats = self.proxy.get_full_stats()
+                logger.info(f"📊 Статистика прокси: {stats}")
 
             logger.info("✅ Прокси сервер остановлен")
             return True
@@ -1020,9 +451,8 @@ class ProxyManager:
         if port_used_by_us:
             status['port_message'] = "Порт занят нашим приложением (возможно старый процесс)"
 
-        # Добавляем статистику кэша
+        # Добавляем статистику прокси
         if self.proxy and self.is_running:
-            status['cache_stats'] = self.proxy.get_cache_stats()
             status['proxy_stats'] = self.proxy.get_full_stats()
 
         return status
