@@ -1,9 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m py_compile:*)",
-      "Bash(python test_token_functionality.py:*)",
-      "Bash(python:*)"
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

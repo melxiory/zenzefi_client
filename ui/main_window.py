@@ -179,14 +179,17 @@ class MainWindow(QMainWindow):
         self.start_btn = QPushButton("Запуск прокси")
         self.stop_btn = QPushButton("Остановка прокси")
         self.restart_btn = QPushButton("Перезапуск")
+        self.open_browser_btn = QPushButton("🌐 Открыть браузер")
 
         self.start_btn.clicked.connect(self.start_proxy)
         self.stop_btn.clicked.connect(self.stop_proxy)
         self.restart_btn.clicked.connect(self.restart_proxy)
+        self.open_browser_btn.clicked.connect(self.open_browser)
 
         buttons_layout.addWidget(self.start_btn)
         buttons_layout.addWidget(self.stop_btn)
         buttons_layout.addWidget(self.restart_btn)
+        buttons_layout.addWidget(self.open_browser_btn)
         proxy_layout.addLayout(buttons_layout)
 
         layout.addWidget(proxy_group)
@@ -483,6 +486,41 @@ class MainWindow(QMainWindow):
             logger.info("ℹ️ Показано сообщение о logout через браузер")
         except Exception as e:
             logger.error(f"Ошибка при показе сообщения о logout: {e}")
+
+    def open_browser(self):
+        """Открывает браузер с токеном аутентификации"""
+        try:
+            # Проверяем что прокси запущен
+            if not self.proxy_manager.is_running:
+                QMessageBox.warning(
+                    self,
+                    "Прокси не запущен",
+                    "Сначала запустите прокси сервер."
+                )
+                return
+
+            # Получаем токен
+            token = self.config.get_access_token()
+            if not token:
+                QMessageBox.warning(
+                    self,
+                    "Токен не найден",
+                    "Сначала сохраните access token в разделе Аутентификация."
+                )
+                return
+
+            # Формируем URL с токеном
+            url = f"https://127.0.0.1:61000/?token={token}"
+
+            # Открываем браузер
+            import webbrowser
+            webbrowser.open(url)
+
+            logger.info(f"🌐 Браузер открыт: {url[:50]}...")
+
+        except Exception as e:
+            logger.error(f"Ошибка открытия браузера: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось открыть браузер: {e}")
 
     def start_proxy(self):
         """Запускает прокси"""

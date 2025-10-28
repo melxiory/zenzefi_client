@@ -117,7 +117,7 @@ class ZenzefiProxy:
                 cookies = {}
                 for name, value in request.cookies.items():
                     cookies[name] = value
-                    logger.debug(f"🍪 Forwarding cookie to backend: {name}")
+                    logger.debug(f"Forwarding cookie to backend: {name}={value[:20]}...")
 
                 # Формируем URL на backend с префиксом /api/v1/proxy
                 # Браузер видит чистый URL, но backend получает с префиксом
@@ -141,6 +141,8 @@ class ZenzefiProxy:
 
                     # Копируем заголовки ответа
                     response_headers = {}
+                    backend_cookies = []  # Собираем Set-Cookie заголовки от backend
+
                     for key, value in upstream_response.headers.items():
                         key_lower = key.lower()
 
@@ -148,9 +150,11 @@ class ZenzefiProxy:
                         if key_lower in ['content-encoding', 'transfer-encoding', 'connection', 'keep-alive']:
                             continue
 
-                        # Специальная обработка Set-Cookie для правильной пересылки
+                        # Специальная обработка Set-Cookie - НЕ копируем напрямую
                         if key_lower == 'set-cookie':
-                            logger.info(f"🍪 Backend set cookie: {value[:50]}...")
+                            logger.info(f"Backend Set-Cookie: {value[:80]}...")
+                            backend_cookies.append(value)
+                            continue  # НЕ добавляем в response_headers
 
                         response_headers[key] = value
 
@@ -165,13 +169,72 @@ class ZenzefiProxy:
                     self.stats['total_responses'] += 1
                     self.stats['active_connections'] -= 1
 
-                    logger.debug(f"✅ Backend response: {upstream_response.status}")
+                    logger.debug(f"Backend response: {upstream_response.status}")
 
-                    return web.Response(
+                    # Создаем response
+                    response = web.Response(
                         body=content,
                         status=upstream_response.status,
                         headers=response_headers
                     )
+
+                    # Переустанавливаем cookies от backend для локального прокси домена
+                    for cookie_header in backend_cookies:
+                        try:
+                            # Парсим Set-Cookie заголовок от backend
+                            # Формат: name=value; Max-Age=123; Path=/; HttpOnly; Secure; SameSite=lax
+                            parts = cookie_header.split(';')
+                            if not parts:
+                                continue
+
+                            # Первая часть - name=value
+                            name_value = parts[0].strip()
+                            if '=' not in name_value:
+                                continue
+
+                            cookie_name, cookie_value = name_value.split('=', 1)
+
+                            # Парсим дополнительные атрибуты
+                            max_age = None
+                            path = '/'
+                            httponly = False
+                            secure = False
+                            samesite = None
+
+                            for part in parts[1:]:
+                                part = part.strip().lower()
+                                if part.startswith('max-age='):
+                                    try:
+                                        max_age = int(part.split('=', 1)[1])
+                                    except:
+                                        pass
+                                elif part.startswith('path='):
+                                    path = part.split('=', 1)[1]
+                                elif part == 'httponly':
+                                    httponly = True
+                                elif part == 'secure':
+                                    secure = True
+                                elif part.startswith('samesite='):
+                                    samesite = part.split('=', 1)[1]
+
+                            # Устанавливаем cookie для локального прокси (127.0.0.1:61000)
+                            # ВАЖНО: НЕ используем Secure для localhost (HTTPS на самоподписанном сертификате)
+                            response.set_cookie(
+                                name=cookie_name,
+                                value=cookie_value,
+                                max_age=max_age,
+                                path=path,
+                                httponly=httponly,
+                                secure=False,  # Localhost с самоподписанным сертификатом
+                                samesite=samesite if samesite else 'Lax'
+                            )
+
+                            logger.info(f"Cookie set for local proxy: {cookie_name}, max_age={max_age}, path={path}")
+
+                        except Exception as e:
+                            logger.error(f"Failed to parse Set-Cookie: {cookie_header[:50]}... Error: {e}")
+
+                    return response
 
             except ClientConnectorError as e:
                 self.stats['errors'] += 1
