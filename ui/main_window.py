@@ -464,11 +464,6 @@ class MainWindow(QMainWindow):
             self.auth_status_label.setText("Backend: ❌ Ошибка")
             self.auth_status_label.setStyleSheet("color: #E4002B;")
 
-    def update_auth_status_ui(self, status_data):
-        """DEPRECATED: Больше не используется в новой архитектуре"""
-        # Cookie статус проверяется в браузере, не в desktop client
-        pass
-
     def on_logout_clicked(self):
         """Обработка нажатия кнопки logout"""
         try:

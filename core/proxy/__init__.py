@@ -1,7 +1,9 @@
 # core/proxy/__init__.py
-"""Модули прокси-сервера"""
+"""
+Proxy modules package.
 
-from .cache_manager import CacheManager
-from .content_rewriter import ContentRewriter
+Note: Desktop Client uses simplified forwarding architecture.
+All caching and content rewriting is handled by the Backend Server.
+"""
 
-__all__ = ['CacheManager', 'ContentRewriter']
+__all__ = []

@@ -28,12 +28,21 @@ python main.py
 
 ### Building Executable
 ```bash
-# Build with PyInstaller
+# Build with PyInstaller (standard way)
 pyinstaller ZenzefiClient.spec
+
+# Build with optimization script (recommended)
+python build_optimized.py
 
 # Output will be in dist/ directory
 # The spec file includes resource bundling and Windows-specific settings
 ```
+
+**Optimized Build Script** (`build_optimized.py`):
+- Automatically cleans previous builds and caches
+- Compiles .pyc files with optimization level 2 (-OO flag)
+- Runs PyInstaller with optimized parameters
+- Displays build statistics (file sizes, file count)
 
 ### Managing Dependencies
 ```bash
@@ -63,55 +72,51 @@ The codebase extensively uses the singleton pattern for global state management.
 
 ### Proxy Architecture
 
-The core proxy functionality (`core/proxy_manager.py`) has three main classes:
+**IMPORTANT:** The Desktop Client is a **simplified proxy** that forwards ALL requests to the Backend Server (127.0.0.1:8000). The Backend handles authentication, content rewriting, caching, and proxying to Zenzefi Server.
 
-1. **LRUCache**: In-memory cache for static resources
-   - Implements Least Recently Used eviction policy
-   - Default capacity: 100 items
-   - Tracks hits/misses for performance monitoring
-   - Used for both HTTP responses and `fix_content()` results
-   - Thread-safe OrderedDict implementation
+The core proxy functionality (`core/proxy_manager.py`) has two main classes:
 
-2. **ZenzefiProxy**: Handles the actual proxying logic
-   - `handle_http()` - Proxies HTTP/HTTPS requests with caching, streaming, compression, and header rewriting
-   - `handle_websocket()` - Bidirectional WebSocket proxying with size limits (10MB)
-   - `fix_content()` - Rewrites URLs in HTML/CSS/JS with regex caching
-   - `router()` - Routes between HTTP and WebSocket handlers based on Upgrade header
-   - `_proxy_to_backend()` - Proxies authentication endpoints to backend server (127.0.0.1:8000)
-   - `_serve_auth_page()` - Serves HTML authentication page with token input
-   - **Performance features:**
-     - LRU cache for static resources (CSS, JS, images, fonts)
-     - Streaming for files >1MB to reduce memory usage
-     - Precompiled regex patterns for faster URL rewriting
-     - Content rewriting cache with MD5 hashing
-     - Connection semaphore limiting concurrent connections to 50
-     - **gzip/deflate compression** for text responses (level 6, >1KB threshold)
-     - **Keep-alive optimization** with explicit timeout headers (60s, 100 requests)
-     - **Performance statistics** tracking requests, responses, compression ratio, cache hits
-   - `_compress_content()` - Automatic response compression based on Accept-Encoding
-   - `_is_compressible()` - Detects text-based content types suitable for compression
-   - `get_full_stats()` - Returns detailed performance metrics
+1. **ZenzefiProxy**: Simple forwarding proxy
+   - `handle_http()` - Forwards ALL HTTP/HTTPS requests to backend (127.0.0.1:8000)
+   - `_proxy_to_backend()` - Core method that proxies requests to backend server
+   - `router()` - Simple router that forwards all requests through `handle_http()`
+   - `get_full_stats()` - Returns basic statistics (requests, responses, errors, active connections)
 
-3. **ProxyManager**: Manages the proxy server lifecycle
+   **Cookie Forwarding:**
+   - Forwards browser cookies to backend
+   - Parses Set-Cookie headers from backend and re-sets them for local proxy domain (127.0.0.1:61000)
+   - Uses `secure=False` for localhost with self-signed certificate
+   - Sends `X-Local-Url` header to backend for proper content rewriting
+
+   **Connection Management:**
+   - TCPConnector configured for backend (ssl=False, localhost HTTP)
+   - Connection pool: 100 total limit, 50 per host
+   - DNS cache: 5 minutes TTL
+   - Keep-alive: 60 seconds timeout
+   - Semaphore limiting concurrent connections to 50
+
+2. **ProxyManager**: Manages the proxy server lifecycle
    - Runs aiohttp server in a separate thread with its own event loop
    - Port conflict detection and resolution (can terminate processes blocking port 61000)
-   - SSL context setup using self-signed certificates
+   - SSL context setup using self-signed certificates (for client connections)
    - Thread-safe start/stop operations using `asyncio.run_coroutine_threadsafe()`
-   - **Connection pooling:** TCPConnector with 100 connection limit, 30 per host, DNS caching (5 min TTL)
    - **Graceful shutdown:** Properly cleans up session, connector, runner, and site resources
-   - Logs cache statistics and performance metrics on shutdown
+   - Logs basic statistics on shutdown
    - `get_proxy_stats()` - Retrieves real-time performance statistics
 
 **Critical Details:**
-- The proxy rewrites all references to `https://zenzefi.melxiory.ru` → `https://127.0.0.1:61000/api/v1/proxy` in responses, including WebSocket URLs (`wss://`)
-- **local_url includes /api/v1/proxy prefix** - this is critical for proper URL rewriting and routing
-- The proxy **strips /api/v1/proxy/ prefix** from paths before forwarding to Zenzefi server (Zenzefi doesn't know about this internal routing prefix)
-- Static resources are cached in memory for faster repeated requests
-- Large files (>1MB) are streamed to avoid loading entirely into memory
-- Connection pool is reused across requests to reduce SSL handshake overhead
-- **Automatic compression** saves 50-80% bandwidth for text responses (HTML, CSS, JS, JSON)
-- **HTTP/2 ready** - TCPConnector configured to support HTTP/2 when available
-- Statistics collection is always active in background for monitoring
+- Desktop Client does **NOT** do content rewriting, caching, compression, or WebSocket handling
+- ALL requests are forwarded to Backend Server at http://127.0.0.1:8000
+- Backend adds `/api/v1/proxy` prefix when routing: browser sees clean URLs, backend gets prefixed paths
+- Desktop Client's `local_url` is WITHOUT prefix: `https://127.0.0.1:61000` (clean URL for browser)
+- Backend receives requests with prefix: `http://127.0.0.1:8000/api/v1/proxy{path}`
+- Connection pool is for backend communication only (HTTP, not HTTPS)
+- Backend is responsible for: authentication, content rewriting, caching, compression, proxying to Zenzefi
+
+**Note:** Desktop Client does NOT have CacheManager or ContentRewriter modules. These features are implemented ONLY in the Backend Server:
+- Backend's `app/services/content_rewriter.py` - URL rewriting in HTML/CSS/JS
+- Backend's caching logic - LRU cache for static resources
+- Desktop Client simply forwards requests/responses without modification
 
 ### Authentication Architecture
 
@@ -124,39 +129,46 @@ The application uses a **cookie-based authentication system** with integration t
 
 **Key Components:**
 
-1. **Access Token Generation** (Desktop Client)
-   - Desktop client generates encrypted access tokens
-   - Token is appended to URL: `https://127.0.0.1:61000/api/v1/proxy?token=...`
-   - Token is used for initial authentication only
+1. **Access Token Requirement** (Desktop Client)
+   - Desktop client **requires** access token before starting proxy
+   - Token is stored encrypted in `ConfigManager` using Fernet encryption
+   - User must configure token in main window before starting proxy
+   - Attempting to start proxy without token shows error message
+   - `config.has_access_token()` checks if token is configured
 
-2. **Cookie Authentication** (Backend Server)
-   - Backend validates token and sets `zenzefi_access_token` cookie
-   - Cookie is httpOnly, secure, SameSite=Lax
-   - All subsequent requests authenticated via cookie
-   - Backend proxies requests to Zenzefi with proper authentication headers
-
-3. **Authentication Flow:**
+2. **Authentication Flow:**
    ```
-   1. User clicks "Open in Browser" in Desktop Client
-   2. Browser opens https://127.0.0.1:61000/api/v1/proxy?token=xyz
-   3. Proxy serves HTML auth page (if no cookie present)
-   4. JavaScript sends token to /api/v1/proxy/authenticate
-   5. Request proxied to backend via _proxy_to_backend()
-   6. Backend validates token, sets cookie, returns success
-   7. Browser redirected to /api/v1/proxy/ (now with valid cookie)
-   8. All subsequent requests use cookie for authentication
+   1. User configures access token in Desktop Client
+   2. User clicks "Start Proxy" (or "Open in Browser")
+   3. Desktop Client validates token is present
+   4. Proxy starts on https://127.0.0.1:61000
+   5. Browser automatically opens: https://127.0.0.1:61000/api/v1/proxy?token=xyz
+   6. Desktop Client forwards request to backend: http://127.0.0.1:8000/api/v1/proxy?token=xyz
+   7. Backend shows auth page or validates cookie
+   8. JavaScript sends token to /api/v1/proxy/authenticate
+   9. Backend validates token, sets `zenzefi_access_token` cookie
+   10. Browser redirected to /api/v1/proxy/ (now authenticated via cookie)
+   11. All subsequent requests include cookie, forwarded by Desktop Client to backend
    ```
 
-4. **Infinite Redirect Prevention:**
-   - Proxy checks for `zenzefi_access_token` cookie before showing auth page
-   - If cookie exists, request is proxied to backend instead
-   - This prevents redirect loops when cookie is already set
+3. **Cookie Forwarding** (Desktop Client → Backend):
+   - Desktop Client reads cookies from browser request
+   - Forwards cookies to backend in request
+   - Backend returns Set-Cookie headers
+   - Desktop Client parses Set-Cookie and re-sets for local domain (127.0.0.1:61000)
+   - Uses `secure=False` for localhost with self-signed certificate
 
-5. **Auth Endpoints Proxied to Backend:**
+4. **Auth Endpoints** (ALL handled by Backend):
    - `/api/v1/proxy/authenticate` - Token → Cookie exchange
    - `/api/v1/proxy/status` - Check authentication status
    - `/api/v1/proxy/logout` - Clear authentication cookie
-   - All handled by `_proxy_to_backend()` method
+   - Desktop Client simply forwards these requests to backend
+
+5. **Browser Auto-Open:**
+   - When proxy starts, Desktop Client automatically opens browser
+   - URL: `https://127.0.0.1:61000/api/v1/proxy?token={encrypted_token}`
+   - This initiates cookie authentication flow
+   - Implemented in `TrayIcon.start_nginx()` and main window
 
 **IMPORTANT:** The backend server must be running at `http://127.0.0.1:8000` for authentication to work. Start with: `poetry run uvicorn app.main:app --reload`
 
@@ -331,30 +343,20 @@ This pattern ensures Qt signals are processed during thread execution, preventin
 
 The application includes several optimizations for production use:
 
-### Proxy Performance
-- **LRU cache** for static resources (100 items max) - reduces repeated requests processing
-- **Connection pooling** via `aiohttp.TCPConnector` (100 total, 30/host) - reuses SSL connections, DNS caching (5min)
-- **Streaming** for large files (>1MB threshold) - avoids memory spikes, 8KB chunks
-- **Precompiled regex** patterns in `ZenzefiProxy` - faster URL rewriting
-- **Content rewriting cache** - MD5-based caching of `fix_content()` results (max 100KB/file)
-- **Concurrency limits** - Semaphore caps connections at 50 to prevent resource exhaustion
-- **gzip/deflate compression** - Automatic text response compression (level 6), saves 50-80% bandwidth
-- **Keep-alive optimization** - Explicit headers (timeout=60s, max=100 requests) reduce connection overhead
-- **HTTP/2 ready** - TCPConnector configured to use HTTP/2 when supported by upstream
+### Desktop Client Performance
+**Important:** Desktop Client is a simple forwarding proxy. All content processing optimizations (caching, compression, rewriting) are handled by the Backend Server.
 
-### Network Optimizations
-- **Compression:** Only compresses content >1KB to avoid overhead on small responses
-- **Keep-alive:** Connection reuse reduces SSL handshake latency by ~200-500ms per request
-- **DNS caching:** 5-minute TTL prevents repeated DNS lookups
-- **Connection pooling:** Up to 30 persistent connections per host
+Desktop Client optimizations:
+- **Connection pooling** to backend via `aiohttp.TCPConnector` (100 total, 50/host)
+- **Keep-alive** connections to backend (60s timeout) - reduces connection overhead
+- **DNS caching** for backend lookups (5 min TTL)
+- **Concurrency limits** - Semaphore caps concurrent backend connections at 50
+- **Basic statistics** - Tracks requests, responses, errors, active connections
 
 ### Memory Management
 - **Log rotation** - `RotatingFileHandler` at 5MB, keeps 5 backups, prevents disk space issues
 - **Lazy loading** - MainWindow created on-demand when user opens it, saves 20-30MB when minimized to tray
-- **Cache size limits** - LRU eviction policy prevents unbounded memory growth, max 100 cached items
-- **WebSocket limits** - 10MB max message size prevents memory attacks
-- **Streaming** - Large responses streamed in 8KB chunks, never fully loaded into memory
-- **Regex caching** - `fix_content()` caches results for repeated identical content
+- **Minimal state** - Desktop Client maintains minimal state, all processing in Backend
 
 ### GUI Performance
 - **Log debouncing** - `LogHandler` batches messages for 200ms, reduces UI updates by 80-90%
@@ -362,18 +364,35 @@ The application includes several optimizations for production use:
 - **Async operations** - All proxy operations run in separate thread/event loop, never block Qt GUI
 - **QTimer for theme** - Theme application deferred via `QTimer.singleShot(0)` to prioritize window rendering
 
+### Backend Performance (Separate Server)
+**Note:** These optimizations are in the Backend Server, not Desktop Client:
+
+- **LRU cache** for static resources - reduces repeated processing
+- **Content rewriting cache** - MD5-based caching of rewritten content
+- **Precompiled regex** patterns for faster URL rewriting
+- **Compression** - gzip/deflate for text responses (configurable)
+- **Streaming** - Large file streaming to reduce memory usage
+- **WebSocket handling** - Bidirectional proxying with size limits
+
 ### Statistics and Monitoring
-The proxy collects performance metrics in background (no UI overhead):
-- Request/response counts, active connections, error rates
-- Cache hit/miss rates, cache size
-- Compression statistics: responses compressed, bytes saved
-- Streaming usage for large files
-- Logged on shutdown for performance analysis
+Desktop Client collects basic metrics (no overhead):
+- Request/response counts
+- Active connections
+- Error rates
+- Logged on shutdown
+
+Backend Server collects detailed performance metrics:
+- Cache hit/miss rates
+- Compression statistics
+- Content rewriting performance
+- WebSocket connections
 
 ## Development Notes
 
 - The app uses Russian language strings in UI and logs
 - Color scheme values are defined in `ui/colors.py` as `COLORS` (dark) and `COLORS_LIGHT`
 - Process termination logic in `utils/process_manager.py` requires careful testing as it can kill processes
-- WebSocket proxying maintains two concurrent tasks (client→server, server→client) using `asyncio.gather()`
-- Cache statistics are logged on proxy shutdown for monitoring performance
+- Desktop Client is intentionally simplified - all complex logic is in Backend Server
+- Basic statistics are logged on proxy shutdown for monitoring
+- Access token is stored encrypted using Fernet (symmetric encryption)
+- Backend must be running for Desktop Client to function properly

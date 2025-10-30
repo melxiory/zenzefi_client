@@ -210,3 +210,7 @@ __marimo__/
 # Nginx folder
 nginx/
 /app_data/
+
+# Claude Code local settings
+.claude/settings.local.json
+.mcp.json
