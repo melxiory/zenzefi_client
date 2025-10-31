@@ -131,44 +131,74 @@ The application uses a **cookie-based authentication system** with integration t
 
 1. **Access Token Requirement** (Desktop Client)
    - Desktop client **requires** access token before starting proxy
-   - Token is stored encrypted in `ConfigManager` using Fernet encryption
-   - User must configure token in main window before starting proxy
-   - Attempting to start proxy without token shows error message
-   - `config.has_access_token()` checks if token is configured
+   - Token is **NOT saved to disk** - must be entered by user each time in UI
+   - Token is stored **ONLY in RAM** (`ProxyManager.current_token`) during proxy operation
+   - Token is cleared from memory when proxy stops (security measure)
+   - Attempting to start proxy without token shows validation error
 
 2. **Authentication Flow:**
    ```
-   1. User configures access token in Desktop Client
-   2. User clicks "Start Proxy" (or "Open in Browser")
+   1. User enters access token in Desktop Client UI (QLineEdit widget)
+   2. User clicks "Start Proxy"
    3. Desktop Client validates token is present
-   4. Proxy starts on https://127.0.0.1:61000
-   5. Browser automatically opens: https://127.0.0.1:61000/api/v1/proxy?token=xyz
-   6. Desktop Client forwards request to backend: http://127.0.0.1:8000/api/v1/proxy?token=xyz
-   7. Backend shows auth page or validates cookie
-   8. JavaScript sends token to /api/v1/proxy/authenticate
-   9. Backend validates token, sets `zenzefi_access_token` cookie
-   10. Browser redirected to /api/v1/proxy/ (now authenticated via cookie)
-   11. All subsequent requests include cookie, forwarded by Desktop Client to backend
+   4. Desktop Client calls proxy_manager.start(backend_url, token)
+   5. Token saved to RAM (ProxyManager.current_token) - NOT to disk
+   6. Proxy starts on https://127.0.0.1:61000
+   7. Desktop Client authenticates with backend: POST /api/v1/proxy/authenticate
+   8. Backend validates token, returns cookie in response
+   9. User manually opens browser and navigates to: https://127.0.0.1:61000/
+   10. On first request, Desktop Client detects missing/outdated browser cookie
+   11. Desktop Client validates token with backend, gets max_age
+   12. Desktop Client sets cookie for browser (zenzefi_access_token, secure=False)
+   13. All subsequent requests use cookie authentication automatically
    ```
 
-3. **Cookie Forwarding** (Desktop Client → Backend):
+3. **User-Agent Detection** (Client Type Detection):
+   - Desktop Client analyzes User-Agent header to distinguish browsers from applications
+   - **Browser clients** (Mozilla, Chrome, Safari, Firefox, Edge, Opera):
+     - Use cookie-based authentication automatically
+     - Desktop Client forwards cookies to backend
+   - **Application clients** (DTS, Monaco, diagnostic tools, curl, Python, etc.):
+     - Desktop Client adds `X-Access-Token` header from `ProxyManager.current_token`
+     - Ensures applications work without cookie support
+   - Implemented in `ZenzefiProxy._is_browser()` (proxy_manager.py:73-118)
+
+4. **Automatic Cookie Management** (Transparent to User):
+   - On GET requests to `/`, `/api/v1/proxy`, `/api/v1/proxy/`:
+     - Desktop Client checks if browser has `zenzefi_access_token` cookie
+     - If missing OR outdated (doesn't match current token in RAM):
+       - Desktop Client validates token with backend
+       - Gets cookie max_age from backend
+       - Sets/updates cookie for browser with 303 redirect
+       - Browser automatically receives updated cookie
+   - Implemented in `ZenzefiProxy._proxy_to_backend()` (proxy_manager.py:151-218)
+   - **Critical:** This happens automatically - user never sees token in URL
+
+5. **Cookie Forwarding** (Desktop Client → Backend):
    - Desktop Client reads cookies from browser request
    - Forwards cookies to backend in request
    - Backend returns Set-Cookie headers
    - Desktop Client parses Set-Cookie and re-sets for local domain (127.0.0.1:61000)
    - Uses `secure=False` for localhost with self-signed certificate
 
-4. **Auth Endpoints** (ALL handled by Backend):
+6. **Auth Endpoints** (ALL handled by Backend):
    - `/api/v1/proxy/authenticate` - Token → Cookie exchange
    - `/api/v1/proxy/status` - Check authentication status
    - `/api/v1/proxy/logout` - Clear authentication cookie
    - Desktop Client simply forwards these requests to backend
 
-5. **Browser Auto-Open:**
-   - When proxy starts, Desktop Client automatically opens browser
-   - URL: `https://127.0.0.1:61000/api/v1/proxy?token={encrypted_token}`
-   - This initiates cookie authentication flow
-   - Implemented in `TrayIcon.start_nginx()` and main window
+7. **Browser Usage:**
+   - User manually opens browser and navigates to `https://127.0.0.1:61000/`
+   - Desktop Client automatically sets cookie on first request (proxy_manager.py:151-218)
+   - Cookie authentication happens transparently without user seeing token
+   - User may see certificate warning - need to accept self-signed certificate
+
+8. **Logout and Cleanup:**
+   - When proxy stops, Desktop Client performs logout from backend
+   - DELETE request to `/api/v1/proxy/logout` with cookie
+   - Clears sensitive data from RAM: `current_token`, `backend_url`, `cookie_jar`
+   - Implemented in `ProxyManager.stop()` and `_logout_from_backend()` (proxy_manager.py:772-823)
+   - Security measure: ensures no tokens remain in memory after shutdown
 
 **IMPORTANT:** The backend server must be running at `http://127.0.0.1:8000` for authentication to work. Start with: `poetry run uvicorn app.main:app --reload`
 
@@ -394,5 +424,6 @@ Backend Server collects detailed performance metrics:
 - Process termination logic in `utils/process_manager.py` requires careful testing as it can kill processes
 - Desktop Client is intentionally simplified - all complex logic is in Backend Server
 - Basic statistics are logged on proxy shutdown for monitoring
-- Access token is stored encrypted using Fernet (symmetric encryption)
+- Access token is **NOT saved to disk** - stored only in RAM during proxy operation, cleared on stop
+- Fernet encryption key (`.encryption_key` file) exists in ConfigManager but currently not used for token storage
 - Backend must be running for Desktop Client to function properly

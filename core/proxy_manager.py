@@ -14,8 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 class ZenzefiProxy:
-    def __init__(self):
-        self.upstream_url = "https://zenzefi.melxiory.ru"
+    def __init__(self, backend_url="http://localhost:8000", proxy_manager=None):
+        """
+        Args:
+            backend_url: URL backend сервера для проксирования
+            proxy_manager: Ссылка на ProxyManager (для доступа к токену)
+        """
+        self.backend_url = backend_url
+        self.proxy_manager = proxy_manager  # Для доступа к current_token
         # Local URL БЕЗ префикса - чистый URL для браузера
         # Backend получит запросы с префиксом /api/v1/proxy (добавляется при проксировании)
         self.local_url = "https://127.0.0.1:61000"
@@ -52,7 +58,7 @@ class ZenzefiProxy:
         if self.session is None:
             self.session = ClientSession(
                 connector=self.connector,
-                timeout=ClientTimeout(total=30, connect=5)
+                timeout=ClientTimeout(total=90, connect=10)  # Увеличено: 90s total (учитывая backend timeout 60s + обработка), 10s connect
             )
 
     async def cleanup(self):
@@ -64,6 +70,52 @@ class ZenzefiProxy:
             await self.connector.close()
             self.connector = None
 
+    def _is_browser(self, user_agent: str) -> bool:
+        """
+        Определить браузер vs приложение по User-Agent
+
+        Args:
+            user_agent: User-Agent заголовок из запроса
+
+        Returns:
+            True - браузер (будет использовать cookie forwarding)
+            False - приложение (нужно добавить X-Access-Token)
+        """
+        if not user_agent:
+            # Нет User-Agent - считаем приложением (безопаснее)
+            logger.debug("❓ No User-Agent, treating as application")
+            return False
+
+        ua_lower = user_agent.lower()
+
+        # ПРИЛОЖЕНИЯ - высокий приоритет
+        # Если User-Agent содержит эти строки - это точно приложение
+        apps = [
+            'dts', 'monaco', 'mercedes', 'diagnostic',
+            'java', 'python', 'curl', 'wget', 'httpie',
+            'postman', 'insomnia', 'restclient', 'api',
+            'bot', 'crawler', 'spider'
+        ]
+        for app in apps:
+            if app in ua_lower:
+                logger.debug(f"🔧 Detected application: {user_agent[:60]}...")
+                return False
+
+        # БРАУЗЕРЫ - распознаем по типичным маркерам
+        browsers = [
+            'mozilla', 'chrome', 'safari', 'firefox',
+            'edge', 'opera', 'msie', 'trident',
+            'chromium', 'webkit'
+        ]
+        for browser in browsers:
+            if browser in ua_lower:
+                logger.debug(f"🌐 Detected browser: {user_agent[:60]}...")
+                return True
+
+        # Неизвестный User-Agent - по умолчанию считаем приложением
+        # Это безопаснее: приложение получит header, браузер может использовать cookie
+        logger.debug(f"❓ Unknown client (treating as application): {user_agent[:60]}...")
+        return False
 
     async def handle_http(self, request):
         """Обработка HTTP/HTTPS запросов через backend proxy"""
@@ -96,6 +148,75 @@ class ZenzefiProxy:
         """
         backend_url = "http://127.0.0.1:8000"
 
+        # ========== АВТОМАТИЧЕСКАЯ УСТАНОВКА/ОБНОВЛЕНИЕ COOKIE В БРАУЗЕРЕ ==========
+        # Проверяем, нужно ли обновить cookie в браузере
+        # Срабатывает если:
+        # 1. У браузера НЕТ cookie zenzefi_access_token
+        # 2. ИЛИ cookie браузера НЕ совпадает с актуальным токеном Desktop Client
+        if (request.method == "GET" and
+            request.path in ("/", "/api/v1/proxy", "/api/v1/proxy/") and
+            self.proxy_manager and
+            self.proxy_manager.current_token):
+
+            browser_token = request.cookies.get('zenzefi_access_token')
+            desktop_token = self.proxy_manager.current_token
+
+            # Проверяем: нужно ли обновить cookie?
+            needs_cookie_update = (
+                browser_token is None or  # У браузера нет cookie
+                browser_token != desktop_token  # ИЛИ cookie устарел
+            )
+
+            if needs_cookie_update:
+                if browser_token is None:
+                    logger.info("🍪 Browser has no cookie, setting new cookie...")
+                else:
+                    logger.info("🔄 Browser cookie outdated, updating to new token...")
+                    logger.debug(f"   Old token: {browser_token[:20]}...")
+                    logger.debug(f"   New token: {desktop_token[:20]}...")
+
+                # Валидируем токен на backend и получаем max_age
+                try:
+                    await self.initialize()  # Убедимся что session инициализирована
+
+                    auth_url = f"{self.backend_url.rstrip('/')}/api/v1/proxy/authenticate"
+
+                    async with self.session.post(
+                        auth_url,
+                        json={"token": desktop_token},
+                        timeout=ClientTimeout(total=10)
+                    ) as auth_response:
+
+                        if auth_response.status == 200:
+                            data = await auth_response.json()
+                            max_age = data.get('cookie_max_age', 3600)  # Default 1 hour
+
+                            # Создаём редирект с Set-Cookie
+                            response = web.Response(status=303)  # See Other redirect
+                            response.headers['Location'] = '/'
+
+                            # Устанавливаем cookie для браузера
+                            response.set_cookie(
+                                name='zenzefi_access_token',
+                                value=desktop_token,
+                                max_age=max_age,
+                                path="/",
+                                httponly=True,
+                                secure=False,  # Localhost с самоподписанным сертификатом
+                                samesite='Lax'
+                            )
+
+                            logger.info(f"✅ Cookie set/updated for browser: zenzefi_access_token={desktop_token[:20]}..., max_age={max_age}s")
+                            return response
+                        else:
+                            logger.error(f"❌ Token validation failed: {auth_response.status}")
+                            # Продолжаем обычное проксирование - backend вернет ошибку
+
+                except Exception as e:
+                    logger.error(f"❌ Failed to validate token: {e}")
+                    # Продолжаем обычное проксирование
+        # ========== КОНЕЦ АВТОМАТИЧЕСКОЙ УСТАНОВКИ COOKIE ==========
+
         # Используем семафор для ограничения одновременных соединений
         async with self.connection_semaphore:
             try:
@@ -109,15 +230,46 @@ class ZenzefiProxy:
                     if key_lower not in ['host', 'connection', 'content-length', 'transfer-encoding']:
                         headers[key] = value
 
+                # ========== Определение типа клиента и добавление токена ==========
+                user_agent = request.headers.get('User-Agent', '')
+                is_browser = self._is_browser(user_agent)
+
+                if not is_browser:
+                    # ПРИЛОЖЕНИЕ - добавляем X-Access-Token из ProxyManager
+                    if self.proxy_manager and self.proxy_manager.current_token:
+                        headers['X-Access-Token'] = self.proxy_manager.current_token
+                        logger.info(
+                            f"🔑 Added X-Access-Token for application\n"
+                            f"   User-Agent: {user_agent[:60]}\n"
+                            f"   Path: {request.path}"
+                        )
+                    else:
+                        logger.warning(
+                            f"⚠️ Application detected but no token available!\n"
+                            f"   User-Agent: {user_agent[:60]}\n"
+                            f"   Path: {request.path}\n"
+                            f"   → Request will likely fail with 401"
+                        )
+                else:
+                    # БРАУЗЕР - полагаемся на cookie forwarding
+                    logger.debug(
+                        f"🍪 Browser detected, relying on cookie authentication\n"
+                        f"   User-Agent: {user_agent[:60]}"
+                    )
+                # ========== Конец определения типа клиента ==========
+
                 # Передаем local_url в backend для правильного content rewriting
                 # Backend должен переписывать URL на этот адрес (БЕЗ префикса /api/v1/proxy)
                 headers['X-Local-Url'] = self.local_url
 
                 # Копируем cookies от браузера
                 cookies = {}
-                for name, value in request.cookies.items():
-                    cookies[name] = value
-                    logger.debug(f"Forwarding cookie to backend: {name}={value[:20]}...")
+                if request.cookies:
+                    for name, value in request.cookies.items():
+                        cookies[name] = value
+                        logger.info(f"🍪 Forwarding cookie to backend: {name}={value[:20]}...")
+                else:
+                    logger.warning(f"⚠️ No cookies in browser request to {request.path}")
 
                 # Формируем URL на backend с префиксом /api/v1/proxy
                 # Браузер видит чистый URL, но backend получает с префиксом
@@ -152,7 +304,7 @@ class ZenzefiProxy:
 
                         # Специальная обработка Set-Cookie - НЕ копируем напрямую
                         if key_lower == 'set-cookie':
-                            logger.info(f"Backend Set-Cookie: {value[:80]}...")
+                            logger.info(f"🍪 Backend Set-Cookie: {value[:100]}...")
                             backend_cookies.append(value)
                             continue  # НЕ добавляем в response_headers
 
@@ -165,6 +317,15 @@ class ZenzefiProxy:
                         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
                         'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With'
                     })
+
+                    # ИСПРАВЛЕНИЕ: aiohttp не принимает charset в Content-Type header
+                    # Убираем charset из Content-Type если он есть
+                    if 'Content-Type' in response_headers or 'content-type' in response_headers:
+                        content_type_key = 'Content-Type' if 'Content-Type' in response_headers else 'content-type'
+                        content_type_value = response_headers[content_type_key]
+                        # Убираем "; charset=..." из значения
+                        if '; charset=' in content_type_value:
+                            response_headers[content_type_key] = content_type_value.split('; charset=')[0]
 
                     self.stats['total_responses'] += 1
                     self.stats['active_connections'] -= 1
@@ -179,6 +340,9 @@ class ZenzefiProxy:
                     )
 
                     # Переустанавливаем cookies от backend для локального прокси домена
+                    if not backend_cookies:
+                        logger.debug("No Set-Cookie headers from backend")
+
                     for cookie_header in backend_cookies:
                         try:
                             # Парсим Set-Cookie заголовок от backend
@@ -229,7 +393,7 @@ class ZenzefiProxy:
                                 samesite=samesite if samesite else 'Lax'
                             )
 
-                            logger.info(f"Cookie set for local proxy: {cookie_name}, max_age={max_age}, path={path}")
+                            logger.info(f"✅ Cookie set for local proxy: {cookie_name}={cookie_value[:20]}..., max_age={max_age}, path={path}, httponly={httponly}, secure={False}, samesite={samesite if samesite else 'Lax'}")
 
                         except Exception as e:
                             logger.error(f"Failed to parse Set-Cookie: {cookie_header[:50]}... Error: {e}")
@@ -309,84 +473,108 @@ class ProxyManager:
         self.thread = None
         self.app_name = "Zenzefi Proxy"
 
-    def start(self, local_port=61000, remote_url="https://zenzefi.melxiory.ru"):
-        """Запуск прокси сервера"""
+        # Security: tokens and cookies in memory only
+        self.current_token = None    # Access token (RAM only)
+        self.backend_url = None       # Backend URL (RAM only)
+        self.cookie_jar = None        # Cookie jar (RAM only)
+
+    def start(self, backend_url="http://localhost:8000", token=None):
+        """
+        Запуск прокси сервера с аутентификацией на backend
+
+        Args:
+            backend_url: URL backend сервера для аутентификации
+            token: Access token для аутентификации (НЕ сохраняется на диск)
+
+        Returns:
+            bool: True если успешно запущен и аутентифицирован
+        """
         if self.is_running:
             logger.warning("⚠️ Прокси уже запущен")
             return False
 
-        try:
-            # Улучшенная проверка порта
-            port_available, port_message = check_port_availability(local_port)
+        if not token:
+            logger.error("❌ Token is required to start proxy")
+            return False
 
-            # Если порт занят, проверяем не нашим ли приложением
-            if not port_available and self.is_port_in_use_by_us(local_port):
-                logger.info("⚠️ Порт занят нашим приложением, пытаемся перезапустить...")
-                self.stop()
-                time.sleep(2)
-                port_available, port_message = check_port_availability(local_port)
+        if not backend_url:
+            logger.error("❌ Backend URL is required")
+            return False
 
-            if not port_available:
-                process_info = get_process_using_port(local_port)
-                if process_info:
-                    logger.warning(f"⚠️ {port_message}")
+        # Сохраняем в память (НЕ на диск!)
+        self.current_token = token
+        self.backend_url = backend_url
 
-                    # Пытаемся завершить процесс, занимающий порт
-                    if self.process_manager.terminate_process(process_info['pid']):
-                        logger.info(f"✅ Процесс завершен, проверяем порт снова...")
-                        time.sleep(2)
-                        port_available, port_message = check_port_availability(local_port)
+        logger.info(
+            f"🔐 Token configured (length: {len(token)} chars)\n"
+            f"🌐 Backend: {backend_url}"
+        )
 
-                # Если порт все еще занят
-                if not port_available:
-                    error_msg = f"Не удалось освободить порт {local_port}. {port_message}"
-                    logger.error(f"❌ {error_msg}")
+        # Проверка порта
+        local_port = 61000  # Фиксированный порт
+        self.local_port = local_port
 
-                    if self.process_manager.is_admin:
-                        user_msg = (
-                            f"❌ Не удалось запустить прокси на порту {local_port}\n\n"
-                            f"Причина: {port_message}\n\n"
-                            f"📋 Решения:\n"
-                            f"• Закройте программу, использующую порт {local_port}\n"
-                            f"• Перезагрузите компьютер\n"
-                            f"• Проверьте системные службы"
-                        )
-                    else:
-                        user_msg = (
-                            f"❌ Не удалось запустить прокси на порту {local_port}\n\n"
-                            f"Причина: {port_message}\n\n"
-                            f"📋 Решения:\n"
-                            f"• Закройте программу, использующую порт {local_port}\n"
-                            f"• Запустите приложение с правами администратора\n"
-                            f"• Проверьте другие экземпляры программы"
-                        )
+        if not check_port_availability(local_port):
+            logger.warning(f"⚠️ Порт {local_port} занят")
 
-                    logger.error(user_msg)
+            process_info = get_process_using_port(local_port)
+            if process_info:
+                logger.info(
+                    f"📌 Процесс на порту {local_port}:\n"
+                    f"   PID: {process_info.get('pid')}\n"
+                    f"   Name: {process_info.get('name')}\n"
+                    f"   Path: {process_info.get('exe')}"
+                )
+
+                # Пытаемся убить процесс
+                pm = get_process_manager()
+                if pm.kill_process_on_port(local_port):
+                    logger.info(f"✅ Процесс на порту {local_port} завершен")
+                else:
+                    logger.error(f"❌ Не удалось освободить порт {local_port}")
                     return False
-
-            # Запускаем прокси сервер
-            self.remote_url = remote_url
-            self.local_port = local_port
-
-            logger.info("🚀 Запускаем прокси сервер...")
-
-            # Создаем новый event loop в отдельном потоке
-            self.thread = threading.Thread(target=self._run_server, daemon=True)
-            self.thread.start()
-
-            # Ждем немного, чтобы сервер успел запуститься
-            time.sleep(3)
-
-            if self.is_running:
-                logger.info(f"✅ Прокси запущен на https://127.0.0.1:{local_port}")
-                logger.info(f"🌐 Проксируется на: {remote_url}")
-                return True
             else:
-                logger.error("❌ Прокси не запустился")
+                logger.error(f"❌ Порт {local_port} занят неизвестным процессом")
                 return False
 
+        try:
+            # Создаём event loop для потока
+            self.loop = asyncio.new_event_loop()
+
+            # Запускаем сервер в отдельном потоке
+            self.thread = threading.Thread(
+                target=self._run_server,
+                daemon=True
+            )
+            self.thread.start()
+
+            # Ждём запуска (максимум 5 секунд)
+            for _ in range(50):
+                if self.is_running:
+                    break
+                time.sleep(0.1)
+
+            if not self.is_running:
+                logger.error("❌ Прокси не запустился за отведенное время")
+                return False
+
+            logger.info(f"✅ Proxy server started on https://127.0.0.1:{local_port}")
+
+            # АУТЕНТИФИКАЦИЯ НА BACKEND
+            logger.info("🔐 Authenticating with backend...")
+            auth_success = self._authenticate_with_backend()
+
+            if not auth_success:
+                logger.error("❌ Authentication failed, stopping proxy")
+                self.stop()
+                return False
+
+            logger.info("✅ Successfully authenticated with backend")
+            return True
+
         except Exception as e:
-            logger.error(f"❌ Ошибка запуска прокси: {e}")
+            logger.error(f"❌ Failed to start proxy: {e}")
+            self.stop()
             return False
 
     def _run_server(self):
@@ -422,9 +610,11 @@ class ProxyManager:
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ssl_context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
 
-            # Создаем прокси
-            self.proxy = ZenzefiProxy()
-            self.proxy.upstream_url = self.remote_url
+            # Создаем прокси с передачей backend_url и ссылки на self
+            self.proxy = ZenzefiProxy(
+                backend_url=self.backend_url,
+                proxy_manager=self  # Передаем ссылку для доступа к токену
+            )
             # Local URL БЕЗ префикса - для чистых URL в браузере
             self.proxy.local_url = f"https://127.0.0.1:{self.local_port}"
 
@@ -456,14 +646,144 @@ class ProxyManager:
             logger.error(f"❌ Ошибка запуска сервера: {e}")
             self.is_running = False
 
-    def stop(self):
-        """Остановка прокси сервера"""
+    def _authenticate_with_backend(self):
+        """
+        Аутентификация на backend сервере через POST /api/v1/proxy/authenticate
+
+        Returns:
+            bool: True если успешно аутентифицирован
+        """
+        if not self.current_token or not self.backend_url:
+            logger.error("❌ No token or backend URL for authentication")
+            return False
+
         try:
-            logger.info("🛑 Останавливаем прокси сервер...")
+            import requests
+
+            auth_url = f"{self.backend_url.rstrip('/')}/api/v1/proxy/authenticate"
+
+            logger.info(f"🔐 Authenticating with: {auth_url}")
+            logger.debug(f"   Token length: {len(self.current_token)} chars")
+
+            # POST запрос с токеном в body
+            response = requests.post(
+                auth_url,
+                json={"token": self.current_token},
+                timeout=10,
+                proxies={"http": None, "https": None}  # Отключаем системный прокси для localhost
+            )
+
+            if response.status_code == 200:
+                # Сохраняем cookie в память
+                self.cookie_jar = response.cookies
+
+                data = response.json()
+                logger.info(
+                    f"✅ Authentication successful!\n"
+                    f"   User ID: {data.get('user_id')}\n"
+                    f"   Token ID: {data.get('token_id')}\n"
+                    f"   Activated: {data.get('is_activated')}\n"
+                    f"   Expires: {data.get('expires_at')}\n"
+                    f"   Cookie set: {data.get('cookie_set')}"
+                )
+
+                # Проверяем что cookie действительно установлен
+                if 'zenzefi_access_token' in self.cookie_jar:
+                    logger.debug(f"   Cookie 'zenzefi_access_token' saved in memory")
+                else:
+                    logger.warning(f"   ⚠️ Cookie not found in response")
+
+                return True
+            else:
+                logger.error(
+                    f"❌ Authentication failed!\n"
+                    f"   Status: {response.status_code}\n"
+                    f"   Response: {response.text}"
+                )
+                return False
+
+        except requests.ConnectionError as e:
+            logger.error(
+                f"❌ Cannot connect to backend server!\n"
+                f"   URL: {auth_url}\n"
+                f"   Error: {e}\n"
+                f"   → Is backend running?"
+            )
+            return False
+        except requests.Timeout:
+            logger.error(f"❌ Authentication request timed out (>10s)")
+            return False
+        except requests.RequestException as e:
+            logger.error(f"❌ Authentication request error: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected authentication error: {e}")
+            logger.exception("Full traceback:")
+            return False
+
+    def _logout_from_backend(self):
+        """
+        Logout от backend сервера через DELETE /api/v1/proxy/logout
+
+        Вызывается при остановке прокси для очистки сессии
+        """
+        if not self.backend_url:
+            logger.debug("No backend URL, skipping logout")
+            return
+
+        if not self.cookie_jar:
+            logger.debug("No cookie jar, skipping logout")
+            return
+
+        try:
+            import requests
+
+            logout_url = f"{self.backend_url.rstrip('/')}/api/v1/proxy/logout"
+
+            logger.info(f"🚪 Logging out from: {logout_url}")
+
+            # DELETE запрос с cookie
+            response = requests.delete(
+                logout_url,
+                cookies=self.cookie_jar,
+                timeout=10,
+                proxies={"http": None, "https": None}  # Отключаем системный прокси для localhost
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(
+                    f"✅ Logged out successfully\n"
+                    f"   Message: {data.get('message', 'N/A')}"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ Logout returned non-200 status\n"
+                    f"   Status: {response.status_code}\n"
+                    f"   Response: {response.text}"
+                )
+
+        except requests.RequestException as e:
+            # Logout errors are non-critical
+            logger.warning(f"⚠️ Logout request error (non-critical): {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ Unexpected logout error (non-critical): {e}")
+
+    def stop(self):
+        """Остановка прокси сервера с logout"""
+        if not self.is_running:
+            logger.warning("⚠️ Прокси не запущен")
+            return
+
+        try:
+            logger.info("🛑 Stopping proxy...")
+
+            # 1. LOGOUT ОТ BACKEND (перед остановкой сервера)
+            self._logout_from_backend()
 
             self.is_running = False
 
-            # Останавливаем aiohttp сервер
+            # 2. Останавливаем aiohttp сервер
             if self.loop and self.loop.is_running():
                 # Запускаем остановку в event loop
                 asyncio.run_coroutine_threadsafe(self._stop_server(), self.loop)
@@ -472,21 +792,33 @@ class ProxyManager:
                 # Останавливаем event loop
                 self.loop.call_soon_threadsafe(self.loop.stop)
 
-            # Ждем завершения потока
+            # 3. Ждем завершения потока
             if self.thread and self.thread.is_alive():
                 self.thread.join(timeout=5)
 
-            # Логируем статистику перед остановкой
+            # 4. ОЧИСТКА ДАННЫХ ИЗ ПАМЯТИ (критично для безопасности)
+            self.current_token = None
+            self.backend_url = None
+            self.cookie_jar = None
+
+            logger.info("🧹 Security cleanup: token, backend_url, cookies cleared from memory")
+
+            # 5. Логируем статистику
             if self.proxy:
                 stats = self.proxy.get_full_stats()
-                logger.info(f"📊 Статистика прокси: {stats}")
+                logger.info(
+                    f"📊 Session statistics:\n"
+                    f"   Total requests: {stats.get('requests', 0)}\n"
+                    f"   Total responses: {stats.get('responses', 0)}\n"
+                    f"   Errors: {stats.get('errors', 0)}\n"
+                    f"   Active connections: {stats.get('active', 0)}"
+                )
 
-            logger.info("✅ Прокси сервер остановлен")
-            return True
+            logger.info("✅ Proxy stopped and cleaned up successfully")
 
         except Exception as e:
-            logger.error(f"❌ Ошибка остановки прокси: {e}")
-            return False
+            logger.error(f"❌ Error stopping proxy: {e}")
+            logger.exception("Full traceback:")
 
     async def _stop_server(self):
         """Асинхронная остановка сервера"""

@@ -36,22 +36,9 @@ class TrayIcon(QSystemTrayIcon):
         theme_action = QAction("Переключить тему", self)
         theme_action.triggered.connect(self.toggle_theme)
 
-        start_action = QAction("Запуск Nginx", self)
-        start_action.triggered.connect(self.start_nginx)
-
-        stop_action = QAction("Остановка Nginx", self)
-        stop_action.triggered.connect(self.stop_nginx)
-
-        restart_action = QAction("Перезапуск Nginx", self)
-        restart_action.triggered.connect(self.restart_nginx)
-
-        menu.addAction(theme_action)
-        menu.addSeparator()
         menu.addAction(show_action)
         menu.addSeparator()
-        menu.addAction(start_action)
-        menu.addAction(stop_action)
-        menu.addAction(restart_action)
+        menu.addAction(theme_action)
         menu.addSeparator()
 
         exit_action = QAction("Выход", self)
@@ -70,25 +57,17 @@ class TrayIcon(QSystemTrayIcon):
     def update_status(self):
         """Обновляет статус в трее"""
         try:
-            status = self.nginx_manager.get_status()
             icon_manager = get_icon_manager()
 
-            # Получаем статус токена
-            from core.config_manager import get_config
-            config = get_config()
-            token_status = "✅ Настроен" if config.has_access_token() else "❌ Не настроен"
-
-            if status['running']:
+            if self.nginx_manager.is_running:
                 self.setIcon(icon_manager.get_icon("green_system_trie.png"))
                 proxy_status = "Запущен"
                 tooltip = (f"Zenzefi Client - {proxy_status}\n"
-                          f"Прокси: https://127.0.0.1:61000\n"
-                          f"Токен: {token_status}")
+                          f"Прокси: https://127.0.0.1:61000")
             else:
                 self.setIcon(icon_manager.get_icon("red_system_trie.png"))
                 proxy_status = "Остановлен"
-                tooltip = (f"Zenzefi Client - {proxy_status}\n"
-                          f"Токен: {token_status}")
+                tooltip = f"Zenzefi Client - {proxy_status}"
 
             self.setToolTip(tooltip)
         except Exception as e:
@@ -102,91 +81,6 @@ class TrayIcon(QSystemTrayIcon):
         self.main_window.show()
         self.main_window.raise_()
         self.main_window.activateWindow()
-
-    def start_nginx(self):
-        """Запускает nginx из трея"""
-        try:
-            from core.config_manager import get_config
-            config = get_config()
-
-            # СТРОГАЯ БЛОКИРОВКА: Проверка токена перед запуском
-            if not config.has_access_token():
-                self.showMessage(
-                    "Zenzefi Client",
-                    "Ошибка: Access token не настроен.\n"
-                    "Откройте главное окно и настройте токен.",
-                    QSystemTrayIcon.Critical,
-                    5000
-                )
-                logger.warning("⚠️ Попытка запуска прокси из трея без токена")
-                return
-
-            remote_url = config.get('proxy.remote_url', 'https://zenzefi.melxiory.ru')
-
-            success = self.nginx_manager.start(61000, remote_url)
-            if success:
-                self.showMessage("Zenzefi Client",
-                                 "Прокси запущен.\n\nОткрываем браузер для аутентификации...",
-                                 QSystemTrayIcon.Information, 3000)
-                logger.info("Прокси запущен из трея")
-
-                # Открываем браузер для cookie аутентификации
-                try:
-                    import webbrowser
-                    access_token = config.get_access_token()
-                    local_port = config.get('proxy.local_port', 61000)
-                    auth_url = f"https://127.0.0.1:{local_port}/api/v1/proxy?token={access_token}"
-                    webbrowser.open(auth_url)
-                    logger.info(f"🌐 Браузер открыт для auth: {auth_url}")
-                except Exception as e:
-                    logger.error(f"Ошибка открытия браузера: {e}")
-            else:
-                self.showMessage("Zenzefi Client", "Ошибка запуска прокси",
-                                 QSystemTrayIcon.Critical, 5000)
-                logger.error("Ошибка запуска прокси из трея")
-        except Exception as e:
-            logger.error(f"Ошибка запуска nginx из трея: {e}")
-            self.showMessage("Zenzefi Client", f"Ошибка: {e}",
-                             QSystemTrayIcon.Critical, 5000)
-
-    def stop_nginx(self):
-        """Останавливает nginx из трея"""
-        try:
-            success = self.nginx_manager.stop()
-            if success:
-                self.showMessage("Zenzefi Client", "Nginx успешно остановлен",
-                                 QSystemTrayIcon.Information, 3000)
-                logger.info("Nginx остановлен из трея")
-            else:
-                self.showMessage("Zenzefi Client", "Ошибка остановки Nginx",
-                                 QSystemTrayIcon.Critical, 5000)
-                logger.error("Ошибка остановки Nginx из трея")
-        except Exception as e:
-            logger.error(f"Ошибка остановки nginx из трея: {e}")
-            self.showMessage("Zenzefi Client", f"Ошибка: {e}",
-                             QSystemTrayIcon.Critical, 5000)
-
-    def restart_nginx(self):
-        """Перезапускает nginx из трея"""
-        try:
-            # Получаем URL из конфигурации
-            from core.config_manager import get_config
-            config = get_config()
-            remote_url = config.get('proxy.remote_url', 'https://zenzefi.melxiory.ru')
-
-            success = self.nginx_manager.restart()
-            if success:
-                self.showMessage("Zenzefi Client", "Nginx успешно перезапущен",
-                                 QSystemTrayIcon.Information, 3000)
-                logger.info("Nginx перезапущен из трея")
-            else:
-                self.showMessage("Zenzefi Client", "Ошибка перезапуска Nginx",
-                                 QSystemTrayIcon.Critical, 5000)
-                logger.error("Ошибка перезапуска Nginx из трея")
-        except Exception as e:
-            logger.error(f"Ошибка перезапуска nginx из трея: {e}")
-            self.showMessage("Zenzefi Client", f"Ошибка: {e}",
-                             QSystemTrayIcon.Critical, 5000)
 
     def on_tray_activated(self, reason):
         """Обрабатывает активацию иконки в трее"""

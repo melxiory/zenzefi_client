@@ -212,53 +212,6 @@ class ConfigManager:
         self.config = self._get_default_config()
         return self.save()
 
-    def get_access_token(self) -> Optional[str]:
-        """Получает расшифрованный access token"""
-        try:
-            if 'auth' in self.config and 'access_token_encrypted' in self.config['auth']:
-                encrypted = self.config['auth']['access_token_encrypted']
-                decrypted = self.cipher.decrypt(encrypted.encode()).decode('utf-8')
-                return decrypted
-        except Exception as e:
-            logger.error(f"Ошибка расшифровки токена: {e}")
-        return None
-
-    def set_access_token(self, token: str) -> bool:
-        """Сохраняет зашифрованный access token"""
-        try:
-            if not token or not token.strip():
-                logger.warning("Попытка сохранить пустой токен")
-                return False
-
-            if 'auth' not in self.config:
-                self.config['auth'] = {}
-
-            encrypted = self.cipher.encrypt(token.encode()).decode('utf-8')
-            self.config['auth']['access_token_encrypted'] = encrypted
-            return self.save()
-        except Exception as e:
-            logger.error(f"Ошибка сохранения токена: {e}")
-            return False
-
-    def clear_access_token(self) -> bool:
-        """Удаляет токен из конфигурации"""
-        try:
-            if 'auth' in self.config and 'access_token_encrypted' in self.config['auth']:
-                del self.config['auth']['access_token_encrypted']
-                # Если секция auth пустая, удаляем её
-                if not self.config['auth']:
-                    del self.config['auth']
-                return self.save()
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка удаления токена: {e}")
-            return False
-
-    def has_access_token(self) -> bool:
-        """Проверяет наличие access token"""
-        return ('auth' in self.config and
-                'access_token_encrypted' in self.config['auth'] and
-                bool(self.config['auth']['access_token_encrypted']))
 
 
 # Синглтон для глобального доступа
