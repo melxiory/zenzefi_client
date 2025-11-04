@@ -74,6 +74,7 @@ class ConfigManager:
                 'enabled': False,
                 'local_port': 61000,
                 'remote_url': '',
+                'backend_url': 'http://localhost:8000',  # Backend server URL
             },
 
             'application': {
@@ -82,12 +83,14 @@ class ConfigManager:
                 'start_minimized': False,
                 'single_instance': True,
                 'show_already_running_message': True,
-                'theme': 'dark'  # ← ДОБАВЬТЕ ЭТУ СТРОКУ
+                'theme': 'dark'
             },
 
             'ui': {
                 'window_width': 800,
                 'window_height': 600,
+                'window_x': None,  # Позиция окна X (None = center)
+                'window_y': None,  # Позиция окна Y (None = center)
             }
         }
 

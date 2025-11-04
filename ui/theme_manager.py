@@ -148,6 +148,75 @@ QScrollBar::handle:vertical {
 QScrollBar::handle:vertical:hover {
     background-color: #666666;
 }
+
+/* Специфические элементы MainWindow */
+QLabel#warningLabel {
+    color: orange;
+    font-size: 10px;
+    font-style: italic;
+}
+
+QLabel#statusLabel {
+    font-weight: bold;
+    font-size: 14px;
+}
+
+QLabel#statusLabel[status="running"] {
+    color: #00FF00;
+    font-weight: bold;
+}
+
+QLabel#statusLabel[status="stopped"] {
+    color: #808080;
+    font-weight: bold;
+}
+
+QLabel#localUrlLabel {
+    font-family: monospace;
+    font-size: 14px;
+}
+
+QLabel#instructionsLabel {
+    color: gray;
+    font-size: 10px;
+    padding: 10px;
+}
+
+/* QMessageBox (всплывающие окна) */
+QMessageBox {
+    background-color: #1A1A1A;
+    color: #FFFFFF;
+}
+
+QMessageBox QLabel {
+    color: #C8C8C8;
+    background-color: #1A1A1A;
+    font-size: 13px;
+}
+
+QMessageBox QPushButton {
+    background-color: #2D2D2D;
+    color: #FFFFFF;
+    border: 1px solid #404040;
+    border-radius: 3px;
+    padding: 6px 20px;
+    min-width: 80px;
+    font-weight: bold;
+}
+
+QMessageBox QPushButton:hover {
+    background-color: #00A0E9;
+    border: 1px solid #00A0E9;
+}
+
+QMessageBox QPushButton:pressed {
+    background-color: #0078B6;
+}
+
+QMessageBox QPushButton:default {
+    background-color: #00A0E9;
+    border: 2px solid #00C8FF;
+}
 """
 
 
@@ -275,9 +344,80 @@ class ThemeManager:
 
         QLabel {{
             color: {colors['text_secondary']};
-            font-size: 12px;
+            font-size: 14px;
             font-weight: normal;
             background-color: {colors['card_bg']};
+        }}
+
+        /* Специфические элементы MainWindow */
+        QLabel#warningLabel {{
+            color: orange;
+            font-size: 10px;
+            font-style: italic;
+        }}
+
+        QLabel#statusLabel {{
+            font-weight: bold;
+            font-size: 14px;
+        }}
+
+        QLabel#statusLabel[status="running"] {{
+            color: #00AA00;
+            font-weight: bold;
+        }}
+
+        QLabel#statusLabel[status="stopped"] {{
+            color: #666666;
+            font-weight: bold;
+        }}
+
+        QLabel#localUrlLabel {{
+            font-family: monospace;
+            font-size: 14px;
+        }}
+
+        QLabel#instructionsLabel {{
+            color: #666666;
+            font-size: 10px;
+            padding: 10px;
+        }}
+
+        /* QMessageBox (всплывающие окна) */
+        QMessageBox {{
+            background-color: {colors['primary_bg']};
+            color: {colors['text_primary']};
+        }}
+
+        QMessageBox QLabel {{
+            color: {colors['text_secondary']};
+            background-color: {colors['card_bg']};
+            font-size: 13px;
+        }}
+
+        QMessageBox QPushButton {{
+            background-color: #F8F8F8;
+            color: {colors['text_primary']};
+            border: 1px solid {colors['border_dark']};
+            border-radius: 3px;
+            padding: 6px 20px;
+            min-width: 80px;
+            font-weight: bold;
+        }}
+
+        QMessageBox QPushButton:hover {{
+            background-color: {colors['button_active']};
+            color: #FFFFFF;
+            border: 1px solid {colors['button_active']};
+        }}
+
+        QMessageBox QPushButton:pressed {{
+            background-color: #0078B6;
+        }}
+
+        QMessageBox QPushButton:default {{
+            background-color: {colors['button_active']};
+            border: 2px solid #00C8FF;
+            color: #FFFFFF;
         }}
         """
 

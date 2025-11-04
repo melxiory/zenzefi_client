@@ -205,6 +205,7 @@ def main():
 
             from ui.main_window import MainWindow
             main_window = MainWindow(proxy_manager)
+            main_window.apply_theme()  # Применяем тему ДО show()
             main_window.show()
             tray_icon.main_window = main_window
         else:

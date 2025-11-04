@@ -78,6 +78,7 @@ class TrayIcon(QSystemTrayIcon):
         if not self.main_window:
             from ui.main_window import MainWindow
             self.main_window = MainWindow(self.nginx_manager)
+            self.main_window.apply_theme()  # Применяем тему при lazy loading
         self.main_window.show()
         self.main_window.raise_()
         self.main_window.activateWindow()
