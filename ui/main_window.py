@@ -22,6 +22,12 @@ class MainWindow(QWidget):
         """Инициализация UI"""
         self.setWindowTitle("Zenzefi Proxy Client")
         self.setMinimumWidth(500)
+        try:
+            from ui.icons import get_icon_manager
+            icon_manager = get_icon_manager()
+            self.setWindowIcon(icon_manager.get_icon("window_img.png"))
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить иконку окна: {e}")
 
         layout = QVBoxLayout()
 

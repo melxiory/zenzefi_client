@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class ZenzefiProxy:
-    def __init__(self, backend_url="http://localhost:8000", proxy_manager=None):
+    def __init__(self, backend_url, proxy_manager=None):
         """
         Args:
             backend_url: URL backend сервера для проксирования
@@ -24,7 +24,7 @@ class ZenzefiProxy:
         self.proxy_manager = proxy_manager  # Для доступа к current_token
         # Local URL БЕЗ префикса - чистый URL для браузера
         # Backend получит запросы с префиксом /api/v1/proxy (добавляется при проксировании)
-        self.local_url = "https://127.0.0.1:61000"
+        self.local_url = backend_url
 
         # Connection pool для переиспользования соединений
         self.connector = None
@@ -139,14 +139,15 @@ class ZenzefiProxy:
 
     async def _proxy_to_backend(self, request):
         """
-        Проксирует ВСЕ запросы на backend (127.0.0.1:8000)
+        Проксирует ВСЕ запросы на backend (используется self.backend_url)
 
         Backend отвечает за:
         - Валидацию cookie аутентификации
         - Проксирование на Zenzefi Server
         - Content rewriting
         """
-        backend_url = "http://127.0.0.1:8000"
+        # Используем backend_url из конфигурации (может быть удалённым сервером)
+        backend_url = self.backend_url
 
         # ========== АВТОМАТИЧЕСКАЯ УСТАНОВКА/ОБНОВЛЕНИЕ COOKIE В БРАУЗЕРЕ ==========
         # Проверяем, нужно ли обновить cookie в браузере
@@ -273,7 +274,8 @@ class ZenzefiProxy:
 
                 # Формируем URL на backend с префиксом /api/v1/proxy
                 # Браузер видит чистый URL, но backend получает с префиксом
-                upstream_url = f"{backend_url}/api/v1/proxy{request.path_qs}"
+                # ВАЖНО: убираем trailing slash из backend_url чтобы избежать двойных слэшей
+                upstream_url = f"{backend_url.rstrip('/')}/api/v1/proxy{request.path_qs}"
                 logger.debug(f"🔐 Proxying to backend: {upstream_url}")
 
                 # Используем переиспользуемую сессию
@@ -478,7 +480,7 @@ class ProxyManager:
         self.backend_url = None       # Backend URL (RAM only)
         self.cookie_jar = None        # Cookie jar (RAM only)
 
-    def start(self, backend_url="http://localhost:8000", token=None):
+    def start(self, backend_url, token=None):
         """
         Запуск прокси сервера с аутентификацией на backend
 
