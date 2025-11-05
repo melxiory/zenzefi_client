@@ -866,6 +866,58 @@ class ProxyManager:
             return self.proxy.get_full_stats()
         return None
 
+    async def check_backend_health(self):
+        """
+        Проверяет состояние backend сервера через /health endpoint
+
+        Returns:
+            dict: {
+                'status': 'healthy'|'degraded'|'unhealthy'|'unreachable',
+                'timestamp': str or None,
+                'error': str or None
+            }
+        """
+        if not self.backend_url:
+            return {
+                'status': 'unreachable',
+                'timestamp': None,
+                'error': 'Backend URL not configured'
+            }
+
+        health_url = f"{self.backend_url}/health"
+
+        try:
+            # Используем отдельную сессию для health check (не зависит от proxy session)
+            async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+                async with session.get(health_url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return {
+                            'status': data.get('status', 'unknown'),
+                            'timestamp': data.get('timestamp'),
+                            'error': None
+                        }
+                    else:
+                        return {
+                            'status': 'unreachable',
+                            'timestamp': None,
+                            'error': f'HTTP {response.status}'
+                        }
+        except (ClientConnectorError, asyncio.TimeoutError) as e:
+            logger.debug(f"Backend health check failed: {e}")
+            return {
+                'status': 'unreachable',
+                'timestamp': None,
+                'error': 'Connection failed'
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in health check: {e}")
+            return {
+                'status': 'unreachable',
+                'timestamp': None,
+                'error': str(e)
+            }
+
     def is_port_in_use_by_us(self, port: int) -> bool:
         """Проверяет, занят ли порт нашим приложением"""
         from utils.port_utils import get_process_using_port

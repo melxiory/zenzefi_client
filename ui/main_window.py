@@ -16,6 +16,7 @@ class MainWindow(QWidget):
     def __init__(self, proxy_manager):
         super().__init__()
         self.proxy_manager = proxy_manager
+        self.health_indicator = None  # Будет создан в _init_ui
         self._init_ui()
 
     def _init_ui(self):
@@ -65,6 +66,15 @@ class MainWindow(QWidget):
         # ========== СЕКЦИЯ 2: Status ==========
         status_group = QGroupBox("Status")
         status_layout = QFormLayout()
+
+        # Health Indicator - Backend server status
+        # Устанавливаем backend_url в ProxyManager перед созданием HealthIndicator
+        if saved_backend_url:
+            self.proxy_manager.backend_url = saved_backend_url
+
+        from ui.health_indicator import HealthIndicator
+        self.health_indicator = HealthIndicator(self.proxy_manager)
+        status_layout.addRow("Backend Health:", self.health_indicator)
 
         self.status_label = QLabel("● Stopped")  # Используем Unicode символ ● (U+25CF)
         self.status_label.setObjectName("statusLabel")  # Используем object name для стилизации
@@ -286,13 +296,17 @@ class MainWindow(QWidget):
         logger.info(f"Сохранена геометрия окна: {geometry.width()}x{geometry.height()} at ({geometry.x()}, {geometry.y()})")
 
     def _on_backend_url_changed(self, text):
-        """Автосохранение backend URL при изменении"""
+        """Автосохранение backend URL при изменении и проверка health"""
         # Сохраняем только если URL валиден (не пустой)
         if text.strip():
             from core.config_manager import get_config
             config = get_config()
             config.set('proxy.backend_url', text.strip(), save=True)
             logger.debug(f"Backend URL сохранён: {text.strip()}")
+
+            # Обновляем backend URL в health indicator и запускаем проверку
+            if self.health_indicator:
+                self.health_indicator.update_backend_url(text.strip())
 
     def apply_theme(self):
         """Применяет текущую тему к главному окну"""
@@ -320,8 +334,14 @@ class MainWindow(QWidget):
             if reply == QMessageBox.StandardButton.Yes:
                 logger.info("Closing application, stopping proxy...")
                 self.proxy_manager.stop()
+                # Останавливаем health check таймер
+                if self.health_indicator:
+                    self.health_indicator.stop_timer()
                 event.accept()
             else:
                 event.ignore()
         else:
+            # Останавливаем health check таймер при закрытии
+            if self.health_indicator:
+                self.health_indicator.stop_timer()
             event.accept()
