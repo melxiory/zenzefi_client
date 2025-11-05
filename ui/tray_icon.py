@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 
 
 class TrayIcon(QSystemTrayIcon):
-    def __init__(self, app, nginx_manager):
+    def __init__(self, app, proxy_manager):
         super().__init__()
         self.app = app
-        self.nginx_manager = nginx_manager
+        self.proxy_manager = proxy_manager
         self.main_window = None
 
         self.setup_ui()
@@ -59,7 +59,7 @@ class TrayIcon(QSystemTrayIcon):
         try:
             icon_manager = get_icon_manager()
 
-            if self.nginx_manager.is_running:
+            if self.proxy_manager.is_running:
                 self.setIcon(icon_manager.get_icon("green_system_trie.png"))
                 proxy_status = "Запущен"
                 tooltip = (f"Zenzefi Client - {proxy_status}\n"
@@ -77,7 +77,7 @@ class TrayIcon(QSystemTrayIcon):
         """Показывает главное окно"""
         if not self.main_window:
             from ui.main_window import MainWindow
-            self.main_window = MainWindow(self.nginx_manager)
+            self.main_window = MainWindow(self.proxy_manager)
             self.main_window.apply_theme()  # Применяем тему при lazy loading
         self.main_window.show()
         self.main_window.raise_()
@@ -100,7 +100,7 @@ class TrayIcon(QSystemTrayIcon):
 
         # Настраиваем содержимое
         msg_box.setWindowTitle('Подтверждение выхода')
-        msg_box.setText('Вы уверены, что хотите выйти? Nginx будет остановлен.')
+        msg_box.setText('Вы уверены, что хотите выйти? Прокси будет остановлен.')
         msg_box.setIcon(QMessageBox.Question)
 
         # Добавляем кнопки
@@ -114,22 +114,12 @@ class TrayIcon(QSystemTrayIcon):
 
         if reply == QMessageBox.Yes:
             try:
-                self.nginx_manager.stop()
+                self.proxy_manager.stop()
                 logger.info("Приложение завершено")
             except Exception as e:
-                logger.error(f"Ошибка при остановке nginx: {e}")
+                logger.error(f"Ошибка при остановке прокси: {e}")
 
             self.app.quit()
-
-    def check_single_instance(self):
-        """Проверяет, является ли этот экземпляр единственным"""
-        try:
-            from utils.single_instance import get_single_instance
-            instance_lock = get_single_instance(51000)
-            return not instance_lock.check_already_running()
-        except Exception as e:
-            logger.error(f"Ошибка проверки единственного экземпляра: {e}")
-            return True
 
     def toggle_theme(self):
         """Переключает тему приложения"""

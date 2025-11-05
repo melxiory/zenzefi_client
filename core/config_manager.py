@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 import os
-from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,6 @@ def get_app_data_dir():
 class ConfigManager:
     def __init__(self):
         self.config_path = self._get_config_path()
-        self.cipher = self._get_cipher()
         self.config = self._load_config()
 
     def _get_config_path(self) -> Path:
@@ -44,28 +42,6 @@ class ConfigManager:
 
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir / 'config.json'
-
-    def _get_cipher(self) -> Fernet:
-        """Возвращает объект шифрования, генерируя ключ при необходимости"""
-        key_path = get_app_data_dir() / '.encryption_key'
-
-        try:
-            if key_path.exists():
-                # Загружаем существующий ключ
-                with open(key_path, 'rb') as key_file:
-                    key = key_file.read()
-            else:
-                # Генерируем новый ключ
-                key = Fernet.generate_key()
-                with open(key_path, 'wb') as key_file:
-                    key_file.write(key)
-                logger.info("🔑 Ключ шифрования сгенерирован")
-
-            return Fernet(key)
-        except Exception as e:
-            logger.error(f"Ошибка инициализации шифрования: {e}")
-            # Fallback: генерируем временный ключ
-            return Fernet(Fernet.generate_key())
 
     def _get_default_config(self) -> dict:
         """Возвращает конфигурацию по умолчанию"""
@@ -181,34 +157,6 @@ class ConfigManager:
     def get_app_config(self) -> Dict[str, Any]:
         """Возвращает настройки приложения"""
         return self.get('application', {})
-
-    def add_connection_history(self, success: bool, message: str = "") -> None:
-        """Добавляет запись в историю подключений"""
-        history = self.get('history.connection_history', [])
-        history.insert(0, {
-            'timestamp': time.time(),
-            'success': success,
-            'message': message
-        })
-
-        history = history[:100]
-        self.set('history.connection_history', history)
-
-    def validate_proxy_config(self) -> tuple[bool, str]:
-        """Проверяет корректность настроек прокси"""
-        port = self.get('proxy.local_port')
-        url = self.get('proxy.remote_url')
-
-        if not isinstance(port, int) or port < 1 or port > 65535:
-            return False, "Порт должен быть числом от 1 до 65535"
-
-        if not url or not isinstance(url, str):
-            return False, "URL должен быть строкой"
-
-        if not url.startswith(('http://', 'https://')):
-            return False, "URL должен начинаться с http:// или https://"
-
-        return True, "Настройки корректны"
 
     def reset_to_defaults(self) -> bool:
         """Сбрасывает настройки к значениям по умолчанию"""

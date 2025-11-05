@@ -46,5 +46,3 @@ COLORS_LIGHT = {
     "card_bg": "#F8F8F8",  # Светлый фон карточек
     "header_bg": "#000000",  # Черный для заголовков
 }
-
-CURRENT_THEME = "dark"

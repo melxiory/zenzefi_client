@@ -1,6 +1,6 @@
 # ui/theme_manager.py
 import logging
-from ui.colors import COLORS, COLORS_LIGHT, CURRENT_THEME
+from ui.colors import COLORS, COLORS_LIGHT
 
 logger = logging.getLogger(__name__)
 

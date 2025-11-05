@@ -4,6 +4,3 @@ def get_stylesheet():
     """Возвращает актуальные стили для текущей темы"""
     theme_manager = get_theme_manager()
     return theme_manager.get_stylesheet()
-
-# Для обратной совместимости
-STYLESHEET = get_stylesheet()
