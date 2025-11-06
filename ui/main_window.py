@@ -324,14 +324,14 @@ class MainWindow(QWidget):
 
             # Backend возвращает UTC время в формате ISO 8601
             # Например: "2025-11-06T18:30:00.123456" или "2025-11-06T18:30:00"
+            # Может быть с/без 'Z' на конце, с/без микросекунд
 
-            # Парсим как UTC время
-            if '.' in expires_at_str:
-                # С микросекундами
-                expires_at_utc = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-            else:
-                # Без микросекунд - добавляем timezone info
-                expires_at_utc = datetime.fromisoformat(expires_at_str).replace(tzinfo=timezone.utc)
+            # Убираем 'Z' если есть и парсим
+            expires_at_str_clean = expires_at_str.replace('Z', '')
+            expires_at_naive = datetime.fromisoformat(expires_at_str_clean)
+
+            # ВСЕГДА добавляем timezone=UTC (backend всегда возвращает UTC время)
+            expires_at_utc = expires_at_naive.replace(tzinfo=timezone.utc)
 
             # Конвертируем из UTC в локальное время пользователя
             expires_at_local = expires_at_utc.astimezone()
