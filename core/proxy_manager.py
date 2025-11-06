@@ -479,6 +479,7 @@ class ProxyManager:
         self.current_token = None    # Access token (RAM only)
         self.backend_url = None       # Backend URL (RAM only)
         self.cookie_jar = None        # Cookie jar (RAM only)
+        self.token_expires_at = None  # Token expiration time (ISO 8601 string, RAM only)
 
         # Error tracking
         self.last_error_type = None  # Тип последней ошибки: 'backend', 'token', 'port', 'unknown'
@@ -702,6 +703,10 @@ class ProxyManager:
                 self.cookie_jar = response.cookies
 
                 data = response.json()
+
+                # Сохраняем время истечения токена
+                self.token_expires_at = data.get('expires_at')
+
                 logger.info(
                     f"✅ Authentication successful!\n"
                     f"   User ID: {data.get('user_id')}\n"
@@ -832,10 +837,11 @@ class ProxyManager:
 
             # 4. ОЧИСТКА ДАННЫХ ИЗ ПАМЯТИ (критично для безопасности)
             self.current_token = None
+            self.token_expires_at = None
             # backend_url НЕ очищаем - нужен для health monitoring
             self.cookie_jar = None
 
-            logger.info("🧹 Security cleanup: token and cookies cleared from memory (backend_url preserved for health checks)")
+            logger.info("🧹 Security cleanup: token, expiration time and cookies cleared from memory (backend_url preserved for health checks)")
 
             # 5. Логируем статистику
             if self.proxy:

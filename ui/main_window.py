@@ -80,10 +80,11 @@ class MainWindow(QWidget):
         self.status_label.setObjectName("statusLabel")  # Используем object name для стилизации
         status_layout.addRow("Proxy Status:", self.status_label)
 
-        self.local_url_label = QLabel("https://127.0.0.1:61000")
-        self.local_url_label.setObjectName("localUrlLabel")  # Используем object name для стилизации
-        self.local_url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        status_layout.addRow("Local Address:", self.local_url_label)
+        # Token expiration time
+        self.token_expiration_label = QLabel("—")  # Em dash (U+2014) для "не доступно"
+        self.token_expiration_label.setObjectName("tokenExpirationLabel")
+        self.token_expiration_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_layout.addRow("Token Expires:", self.token_expiration_label)
 
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
@@ -103,19 +104,6 @@ class MainWindow(QWidget):
         controls_layout.addWidget(self.stop_btn)
 
         layout.addLayout(controls_layout)
-
-        # ========== СЕКЦИЯ 4: Instructions ==========
-        instructions = QLabel(
-            "<b>Instructions:</b><br>"
-            "1. Enter Backend URL (where FastAPI server runs)<br>"
-            "2. Enter Access Token (from <i>/api/v1/tokens/purchase</i>)<br>"
-            "3. Click <b>Start Proxy</b><br>"
-            "4. Configure your application to use proxy: <code>127.0.0.1:61000</code><br>"
-            "5. Applications will authenticate automatically"
-        )
-        instructions.setObjectName("instructionsLabel")  # Используем object name для стилизации
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
 
         # Spacer
         layout.addStretch()
@@ -172,6 +160,10 @@ class MainWindow(QWidget):
                 self.status_label.setProperty("status", "running")  # Используем property для стилизации
                 self.status_label.style().unpolish(self.status_label)
                 self.status_label.style().polish(self.status_label)
+
+                # Обновляем время истечения токена
+                self._update_token_expiration()
+
                 self.start_btn.setEnabled(False)
                 self.stop_btn.setEnabled(True)
                 self.backend_url_input.setEnabled(False)
@@ -244,6 +236,10 @@ class MainWindow(QWidget):
             self.status_label.setProperty("status", "stopped")  # Используем property для стилизации
             self.status_label.style().unpolish(self.status_label)
             self.status_label.style().polish(self.status_label)
+
+            # Очищаем время истечения токена
+            self.token_expiration_label.setText("—")
+
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self.backend_url_input.setEnabled(True)
@@ -313,6 +309,42 @@ class MainWindow(QWidget):
             # Обновляем backend URL в health indicator и запускаем проверку
             if self.health_indicator:
                 self.health_indicator.update_backend_url(text.strip())
+
+    def _update_token_expiration(self):
+        """Обновляет отображение времени истечения токена"""
+        if not self.proxy_manager.token_expires_at:
+            self.token_expiration_label.setText("—")
+            return
+
+        try:
+            from datetime import datetime, timezone
+
+            # Парсим ISO 8601 строку из бекенда
+            expires_at_str = self.proxy_manager.token_expires_at
+
+            # Backend возвращает UTC время в формате ISO 8601
+            # Например: "2025-11-06T18:30:00.123456" или "2025-11-06T18:30:00"
+
+            # Парсим как UTC время
+            if '.' in expires_at_str:
+                # С микросекундами
+                expires_at_utc = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+            else:
+                # Без микросекунд - добавляем timezone info
+                expires_at_utc = datetime.fromisoformat(expires_at_str).replace(tzinfo=timezone.utc)
+
+            # Конвертируем из UTC в локальное время пользователя
+            expires_at_local = expires_at_utc.astimezone()
+
+            # Форматируем для отображения (локальное время)
+            formatted = expires_at_local.strftime("%d.%m.%Y %H:%M:%S")
+
+            self.token_expiration_label.setText(formatted)
+            logger.debug(f"Token expiration updated: {formatted} (local time, UTC: {expires_at_utc.strftime('%H:%M:%S')})")
+
+        except Exception as e:
+            logger.error(f"Failed to parse token expiration: {e}")
+            self.token_expiration_label.setText("Invalid format")
 
     def apply_theme(self):
         """Применяет текущую тему к главному окну"""
