@@ -480,6 +480,10 @@ class ProxyManager:
         self.backend_url = None       # Backend URL (RAM only)
         self.cookie_jar = None        # Cookie jar (RAM only)
 
+        # Error tracking
+        self.last_error_type = None  # Тип последней ошибки: 'backend', 'token', 'port', 'unknown'
+        self.last_error_details = None  # Детали последней ошибки
+
     def start(self, backend_url, token=None):
         """
         Запуск прокси сервера с аутентификацией на backend
@@ -516,8 +520,9 @@ class ProxyManager:
         local_port = 61000  # Фиксированный порт
         self.local_port = local_port
 
-        if not check_port_availability(local_port):
-            logger.warning(f"⚠️ Порт {local_port} занят")
+        port_available, port_message = check_port_availability(local_port)
+        if not port_available:
+            logger.warning(f"⚠️ {port_message}")
 
             process_info = get_process_using_port(local_port)
             if process_info:
@@ -525,18 +530,36 @@ class ProxyManager:
                     f"📌 Процесс на порту {local_port}:\n"
                     f"   PID: {process_info.get('pid')}\n"
                     f"   Name: {process_info.get('name')}\n"
-                    f"   Path: {process_info.get('exe')}"
+                    f"   User: {process_info.get('username', 'N/A')}"
                 )
 
                 # Пытаемся убить процесс
                 pm = get_process_manager()
                 if pm.kill_process_on_port(local_port):
-                    logger.info(f"✅ Процесс на порту {local_port} завершен")
+                    logger.info(f"✅ Процесс на порту {local_port} завершен, повторная проверка порта...")
+
+                    # Даем небольшую задержку для освобождения порта
+                    import time
+                    time.sleep(0.5)
+
+                    # Проверяем, что порт действительно освободился
+                    port_available, port_message = check_port_availability(local_port)
+                    if not port_available:
+                        logger.error(f"❌ Порт {local_port} все еще занят после завершения процесса")
+                        self.last_error_type = 'port'
+                        self.last_error_details = f"Не удалось освободить порт {local_port}: {port_message}"
+                        return False
+
+                    logger.info(f"✅ Порт {local_port} успешно освобожден")
                 else:
-                    logger.error(f"❌ Не удалось освободить порт {local_port}")
+                    logger.error(f"❌ Не удалось завершить процесс на порту {local_port}")
+                    self.last_error_type = 'port'
+                    self.last_error_details = f"Порт {local_port} занят процессом {process_info.get('name')} (PID: {process_info.get('pid')}). Требуются права администратора для завершения процесса."
                     return False
             else:
                 logger.error(f"❌ Порт {local_port} занят неизвестным процессом")
+                self.last_error_type = 'port'
+                self.last_error_details = f"Порт {local_port} занят неизвестным процессом. Не удалось определить процесс."
                 return False
 
         try:
@@ -702,6 +725,8 @@ class ProxyManager:
                     f"   Status: {response.status_code}\n"
                     f"   Response: {response.text}"
                 )
+                self.last_error_type = 'token'
+                self.last_error_details = f"Invalid access token (HTTP {response.status_code})"
                 return False
 
         except requests.ConnectionError as e:
@@ -711,16 +736,24 @@ class ProxyManager:
                 f"   Error: {e}\n"
                 f"   → Is backend running?"
             )
+            self.last_error_type = 'backend'
+            self.last_error_details = "Cannot connect to backend server"
             return False
         except requests.Timeout:
             logger.error(f"❌ Authentication request timed out (>10s)")
+            self.last_error_type = 'backend'
+            self.last_error_details = "Backend connection timeout"
             return False
         except requests.RequestException as e:
             logger.error(f"❌ Authentication request error: {e}")
+            self.last_error_type = 'backend'
+            self.last_error_details = str(e)
             return False
         except Exception as e:
             logger.error(f"❌ Unexpected authentication error: {e}")
             logger.exception("Full traceback:")
+            self.last_error_type = 'unknown'
+            self.last_error_details = str(e)
             return False
 
     def _logout_from_backend(self):

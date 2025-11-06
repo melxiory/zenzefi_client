@@ -108,6 +108,43 @@ class ProcessManager:
             'message': 'С правами администратора' if self.is_admin else 'Без прав администратора'
         }
 
+    def kill_process_on_port(self, port: int) -> bool:
+        """
+        Завершает процесс, занимающий указанный порт
+
+        Args:
+            port: Номер порта
+
+        Returns:
+            bool: True если процесс был успешно завершен
+        """
+        from .port_utils import get_process_using_port
+
+        process_info = get_process_using_port(port)
+        if not process_info:
+            logger.warning(f"⚠️ Процесс на порту {port} не найден")
+            return False
+
+        pid = process_info.get('pid')
+        if not pid:
+            logger.error(f"❌ Не удалось получить PID процесса на порту {port}")
+            return False
+
+        logger.info(
+            f"🔄 Attempting to terminate process on port {port}:\n"
+            f"   PID: {pid}\n"
+            f"   Name: {process_info.get('name')}\n"
+            f"   User: {process_info.get('username', 'N/A')}"
+        )
+
+        # Пытаемся завершить процесс (сначала мягко, потом принудительно)
+        if self.terminate_process(pid, force=False):
+            return True
+
+        # Если мягкое завершение не сработало, пробуем принудительно
+        logger.warning(f"⚠️ Soft termination failed, trying force kill for PID {pid}")
+        return self.terminate_process(pid, force=True)
+
 
 # Синглтон для глобального доступа
 _process_manager = None

@@ -177,32 +177,52 @@ class MainWindow(QWidget):
                 self.backend_url_input.setEnabled(False)
                 self.token_input.setEnabled(False)
 
-                # Показываем успешное сообщение
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    f"<b>Proxy Started Successfully!</b><br><br>"
-                    f"<b>Local Proxy:</b> https://127.0.0.1:61000<br>"
-                    f"<b>Backend:</b> {backend_url}<br><br>"
-                    f"Open your browser and navigate to:<br>"
-                    f"<b>https://127.0.0.1:61000/</b><br><br>"
-                    f"You may see a certificate warning - click 'Advanced' → 'Proceed'.<br>"
-                    f"Cookie will be automatically set on first request!"
-                )
-
                 logger.info("✅ Proxy started and authenticated successfully")
             else:
-                QMessageBox.critical(
-                    self,
-                    "Start Failed",
-                    "<b>Failed to start proxy.</b><br><br>"
-                    "Possible reasons:<br>"
-                    "• Backend server is not running<br>"
-                    "• Invalid access token<br>"
-                    "• Port 61000 is already in use<br><br>"
-                    "Check the logs for more details."
-                )
-                logger.error("❌ Failed to start proxy")
+                # Получаем детали ошибки из ProxyManager
+                error_type = self.proxy_manager.last_error_type
+                error_details = self.proxy_manager.last_error_details
+
+                # Формируем сообщение об ошибке в зависимости от типа
+                if error_type == 'backend':
+                    error_title = "Backend Connection Error"
+                    error_message = (
+                        f"<b>Cannot connect to backend server</b><br><br>"
+                        f"Backend URL: {backend_url}<br><br>"
+                        f"<b>Solutions:</b><br>"
+                        f"• Make sure backend server is running<br>"
+                        f"• Check that backend URL is correct<br>"
+                        f"• Verify firewall/antivirus is not blocking connection"
+                    )
+                elif error_type == 'token':
+                    error_title = "Invalid Access Token"
+                    error_message = (
+                        f"<b>Access token is invalid or expired</b><br><br>"
+                        f"<b>Solutions:</b><br>"
+                        f"• Verify you entered the correct token<br>"
+                        f"• Purchase a new token from /api/v1/tokens/purchase<br>"
+                        f"• Check that token hasn't expired"
+                    )
+                elif error_type == 'port':
+                    error_title = "Port Already in Use"
+                    error_message = (
+                        f"<b>Port 61000 is already in use</b><br><br>"
+                        f"{error_details or 'Port is occupied by another process'}<br><br>"
+                        f"<b>Solutions:</b><br>"
+                        f"• Run this program as Administrator to automatically free the port<br>"
+                        f"• Manually close the application using port 61000<br>"
+                        f"• Restart your computer"
+                    )
+                else:
+                    error_title = "Start Failed"
+                    error_message = (
+                        f"<b>Failed to start proxy</b><br><br>"
+                        f"{error_details or 'Unknown error occurred'}<br><br>"
+                        f"Check logs for more details"
+                    )
+
+                QMessageBox.critical(self, error_title, error_message)
+                logger.error(f"❌ Failed to start proxy: {error_type} - {error_details}")
 
         except Exception as e:
             QMessageBox.critical(
@@ -213,48 +233,34 @@ class MainWindow(QWidget):
             logger.exception("❌ Exception starting proxy")
 
     def on_stop_proxy(self):
-        """Остановка прокси с подтверждением"""
+        """Остановка прокси"""
+        try:
+            logger.info("Stopping proxy...")
 
-        reply = QMessageBox.question(
-            self,
-            "Stop Proxy",
-            "<b>Stop proxy and logout from backend?</b><br><br>"
-            "This will:<br>"
-            "• Stop the local proxy server<br>"
-            "• Logout from backend (clear session)<br>"
-            "• Clear token from memory",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
+            self.proxy_manager.stop()
 
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                logger.info("Stopping proxy...")
+            # Обновляем UI
+            self.status_label.setText("● Stopped")  # Используем Unicode символ ● (U+25CF)
+            self.status_label.setProperty("status", "stopped")  # Используем property для стилизации
+            self.status_label.style().unpolish(self.status_label)
+            self.status_label.style().polish(self.status_label)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.backend_url_input.setEnabled(True)
+            self.token_input.setEnabled(True)
 
-                self.proxy_manager.stop()
+            # Очищаем токен для безопасности
+            self.token_input.clear()
 
-                # Обновляем UI
-                self.status_label.setText("● Stopped")  # Используем Unicode символ ● (U+25CF)
-                self.status_label.setProperty("status", "stopped")  # Используем property для стилизации
-                self.status_label.style().unpolish(self.status_label)
-                self.status_label.style().polish(self.status_label)
-                self.start_btn.setEnabled(True)
-                self.stop_btn.setEnabled(False)
-                self.backend_url_input.setEnabled(True)
-                self.token_input.setEnabled(True)
+            logger.info("✅ Proxy stopped successfully")
 
-                # Очищаем токен для безопасности
-                self.token_input.clear()
-
-                logger.info("✅ Proxy stopped successfully")
-
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Error",
-                    f"<b>Error stopping proxy:</b><br><br>{str(e)}"
-                )
-                logger.exception("❌ Exception stopping proxy")
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"<b>Error stopping proxy:</b><br><br>{str(e)}"
+            )
+            logger.exception("❌ Exception stopping proxy")
 
     def _restore_window_geometry(self):
         """Восстанавливает размеры и позицию окна из конфига"""
