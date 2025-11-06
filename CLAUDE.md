@@ -223,9 +223,19 @@ The `ConfigManager` supports dot notation for nested keys:
 ```python
 config.get('proxy.local_port')  # Returns 61000
 config.set('application.theme', 'dark', save=True)
+config.set('proxy.backend_url', 'http://localhost:8000', save=True)
 ```
 
 Config is auto-merged with defaults, so missing keys always have fallback values.
+
+**Persisted Settings:**
+- `proxy.backend_url` - Backend server URL (auto-saved on change in UI)
+- `application.theme` - UI theme ('dark' or 'light')
+- `application.start_minimized` - Start in system tray
+- `application.minimize_to_tray` - Close to tray vs exit
+- Window geometry (position, size) - Auto-saved on close
+
+**Note:** Access token is **NOT** saved to config for security (RAM only during proxy operation).
 
 ### Single Instance Enforcement
 
@@ -262,6 +272,7 @@ The application uses a Mercedes-Benz inspired dark theme by default with a light
 - `ui/theme_manager.py` - Theme switching and stylesheet generation
 - `ui/colors.py` - Color palette definitions
 - `ui/styles.py` - Additional style helpers
+- `ui/health_indicator.py` - Backend health status monitoring widget
 
 **Theme switching:** Changes are saved to config and require restarting the app or manually calling `apply_theme()` on all windows.
 
@@ -278,6 +289,49 @@ The tray icon (`ui/tray_icon.py`) is always visible and provides:
 - This saves ~20-30MB RAM when running minimized
 
 The main window can be closed while keeping the app running in the tray (controlled by `minimize_to_tray` config).
+
+### Backend Health Monitoring
+
+The application includes a real-time backend health monitoring system (`ui/health_indicator.py`):
+
+**Health Status Indicator:**
+- Visual indicator (colored dot) showing backend server status
+- Checks backend `/health` endpoint every 60 seconds
+- Displays four states:
+  - **Healthy** (green) - All backend services operational
+  - **Degraded** (yellow) - Some non-critical services down
+  - **Unhealthy** (red) - Critical backend services down
+  - **Unreachable** (gray) - Backend server not responding
+
+**Features:**
+- Automatic periodic checks (60s interval)
+- Immediate check on application startup
+- Manual trigger via `check_now()` method
+- Thread-safe updates using Qt signals
+- Updates automatically when backend URL changes
+- Works both when proxy is running (uses proxy event loop) and stopped (creates temporary event loop)
+
+**Implementation:**
+- Located in `ui/health_indicator.py` as `HealthIndicator` widget
+- Integrated into MainWindow Status section
+- Timer lifecycle managed by MainWindow (starts on init, stops on close)
+
+### Token Expiration Display
+
+The Status section includes token expiration time display:
+
+**Features:**
+- Shows when current access token will expire
+- Automatically updates when proxy starts with valid token
+- Fetches expiration time from backend `/api/v1/proxy/status` endpoint
+- Converts UTC timestamp to local timezone for user-friendly display
+- Displays "—" (em dash) when no active token
+
+**Implementation:**
+- Located in `ui/main_window.py:271-305` as `_update_token_expiration()` method
+- Uses `asyncio.run_coroutine_threadsafe()` for non-blocking backend requests
+- Handles timezone conversion: `datetime.fromtimestamp()` for local time
+- Format: "DD.MM.YYYY HH:MM" (e.g., "06.11.2025 20:45")
 
 ## Port Management
 
@@ -427,3 +481,33 @@ Backend Server collects detailed performance metrics:
 - Access token is **NOT saved to disk** - stored only in RAM during proxy operation, cleared on stop
 - Fernet encryption key (`.encryption_key` file) exists in ConfigManager but currently not used for token storage
 - Backend must be running for Desktop Client to function properly
+
+### Recent Features (v0.3.0-beta)
+
+**Backend Health Monitoring:**
+- Real-time health status indicator in MainWindow Status section
+- Automatic checks every 60 seconds
+- Visual feedback: green (healthy), yellow (degraded), red (unhealthy), gray (unreachable)
+- Immediate check on startup and backend URL change
+
+**Token Expiration Display:**
+- Shows when current access token expires in local timezone
+- Fetches from backend `/api/v1/proxy/status` endpoint
+- Updates automatically when proxy starts
+- Format: DD.MM.YYYY HH:MM (e.g., "06.11.2025 20:45")
+
+**Backend URL Persistence:**
+- Backend URL automatically saved to config on change
+- Restored on next application startup
+- Eliminates need to re-enter URL every time
+
+**Port Auto-Kill Feature:**
+- Automatically terminates processes blocking port 61000
+- Requires administrator rights for non-owned processes
+- Provides clear error messages if auto-kill fails
+- Implemented in `core/proxy_manager.py` and `utils/process_manager.py`
+
+**Improved Error Handling:**
+- Categorized error types: backend, token, port, generic
+- Context-specific error messages with solutions
+- Better user guidance for troubleshooting
