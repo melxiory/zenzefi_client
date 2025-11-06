@@ -56,9 +56,9 @@ class MainWindow(QWidget):
         config_layout.addRow("Access Token:", self.token_input)
 
         # Предупреждение о безопасности
-        warning_label = QLabel("⚠️  Token is NOT saved for security (enter each time)")
-        warning_label.setObjectName("warningLabel")  # Используем object name для стилизации
-        config_layout.addRow("", warning_label)
+        # warning_label = QLabel("⚠️  Token is NOT saved for security (enter each time)")
+        # warning_label.setObjectName("warningLabel")  # Используем object name для стилизации
+        # config_layout.addRow("", warning_label)
 
         config_group.setLayout(config_layout)
         layout.addWidget(config_group)
@@ -340,14 +340,10 @@ class MainWindow(QWidget):
             if reply == QMessageBox.StandardButton.Yes:
                 logger.info("Closing application, stopping proxy...")
                 self.proxy_manager.stop()
-                # Останавливаем health check таймер
-                if self.health_indicator:
-                    self.health_indicator.stop_timer()
+                # Health check таймер останавливается автоматически при выходе
                 event.accept()
             else:
                 event.ignore()
         else:
-            # Останавливаем health check таймер при закрытии
-            if self.health_indicator:
-                self.health_indicator.stop_timer()
+            # Просто закрываем окно (таймер продолжает работать в фоне)
             event.accept()

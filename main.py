@@ -227,6 +227,14 @@ def main():
             except Exception as e:
                 logger.error(f"Ошибка при остановке прокси: {e}")
 
+            try:
+                if tray_icon.main_window and hasattr(tray_icon.main_window, 'health_indicator'):
+                    if tray_icon.main_window.health_indicator:
+                        tray_icon.main_window.health_indicator.stop_timer()
+                        logger.info("Health check timer stopped during cleanup")
+            except Exception as e:
+                logger.error(f"Ошибка при остановке health таймера: {e}")
+
             # Освобождаем блокировку приложения
             instance_lock.unlock()
 

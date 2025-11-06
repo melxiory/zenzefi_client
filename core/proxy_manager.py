@@ -539,7 +539,6 @@ class ProxyManager:
                     logger.info(f"✅ Процесс на порту {local_port} завершен, повторная проверка порта...")
 
                     # Даем небольшую задержку для освобождения порта
-                    import time
                     time.sleep(0.5)
 
                     # Проверяем, что порт действительно освободился
@@ -833,10 +832,10 @@ class ProxyManager:
 
             # 4. ОЧИСТКА ДАННЫХ ИЗ ПАМЯТИ (критично для безопасности)
             self.current_token = None
-            self.backend_url = None
+            # backend_url НЕ очищаем - нужен для health monitoring
             self.cookie_jar = None
 
-            logger.info("🧹 Security cleanup: token, backend_url, cookies cleared from memory")
+            logger.info("🧹 Security cleanup: token and cookies cleared from memory (backend_url preserved for health checks)")
 
             # 5. Логируем статистику
             if self.proxy:
