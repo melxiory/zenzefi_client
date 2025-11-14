@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QLineEdit, QGroupBox, QFormLayout, QMessageBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.proxy_manager = proxy_manager
         self.health_indicator = None  # Будет создан в _init_ui
+        self.token_status_timer = None  # QTimer для проверки статуса токена
         self._init_ui()
 
     def _init_ui(self):
@@ -110,6 +111,12 @@ class MainWindow(QWidget):
 
         self.setLayout(layout)
 
+        # ========== Token Status Timer ==========
+        # Таймер для периодической проверки статуса токена (обновляет expires_at после активации)
+        self.token_status_timer = QTimer(self)
+        self.token_status_timer.setInterval(60000)  # Проверять каждые 5 секунд
+        self.token_status_timer.timeout.connect(self._refresh_token_status_ui)
+
     def on_start_proxy(self):
         """Запуск прокси с валидацией и аутентификацией"""
 
@@ -163,6 +170,12 @@ class MainWindow(QWidget):
 
                 # Обновляем время истечения токена
                 self._update_token_expiration()
+
+                # Запускаем таймер для периодического обновления статуса токена
+                # (обновит expires_at после активации токена первым proxy запросом)
+                if self.token_status_timer:
+                    self.token_status_timer.start()
+                    logger.info("⏱️ Token status refresh timer started (5s interval)")
 
                 self.start_btn.setEnabled(False)
                 self.stop_btn.setEnabled(True)
@@ -228,6 +241,11 @@ class MainWindow(QWidget):
         """Остановка прокси"""
         try:
             logger.info("Stopping proxy...")
+
+            # Останавливаем таймер обновления статуса токена
+            if self.token_status_timer and self.token_status_timer.isActive():
+                self.token_status_timer.stop()
+                logger.info("⏱️ Token status refresh timer stopped")
 
             self.proxy_manager.stop()
 
@@ -345,6 +363,26 @@ class MainWindow(QWidget):
         except Exception as e:
             logger.error(f"Failed to parse token expiration: {e}")
             self.token_expiration_label.setText("Invalid format")
+
+    def _refresh_token_status_ui(self):
+        """
+        Периодически обновляет статус токена и UI
+
+        Вызывается таймером каждые 5 секунд для обновления expires_at после активации токена.
+        """
+        # Проверяем, что прокси запущен
+        if not self.proxy_manager.is_running:
+            return
+
+        # Обновляем статус токена в ProxyManager
+        # refresh_token_status() обновит self.proxy_manager.token_expires_at
+        valid = self.proxy_manager.refresh_token_status()
+
+        if valid:
+            # Обновляем UI с новым expires_at
+            self._update_token_expiration()
+        else:
+            logger.warning("Token status refresh failed (proxy may be disconnected from backend)")
 
     def apply_theme(self):
         """Применяет текущую тему к главному окну"""

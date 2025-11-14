@@ -521,6 +521,22 @@ class ProxyManager:
             self.last_error_details = str(e)
             return False
 
+    def refresh_token_status(self):
+        """
+        Публичный метод для обновления статуса токена (используется из UI)
+
+        Обновляет self.token_expires_at если токен активирован.
+        Можно вызывать периодически для обновления UI после активации токена.
+
+        Returns:
+            bool: True если токен валиден и статус обновлен
+        """
+        if not self.is_running:
+            logger.debug("Proxy not running, skipping token status refresh")
+            return False
+
+        return self._check_token_status()
+
     def stop(self):
         """Остановка прокси сервера"""
         if not self.is_running:
