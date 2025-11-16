@@ -114,7 +114,7 @@ class MainWindow(QWidget):
         # ========== Token Status Timer ==========
         # Таймер для периодической проверки статуса токена (обновляет expires_at после активации)
         self.token_status_timer = QTimer(self)
-        self.token_status_timer.setInterval(60000)  # Проверять каждые 5 секунд
+        self.token_status_timer.setInterval(60000)  # Проверять каждые 60 секунд
         self.token_status_timer.timeout.connect(self._refresh_token_status_ui)
 
     def on_start_proxy(self):

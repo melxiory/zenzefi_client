@@ -120,6 +120,24 @@ class ZenzefiProxy:
                         f"   → Request will likely fail with 401"
                     )
 
+                # Добавляем X-Device-ID header (для device conflict detection)
+                if self.proxy_manager and self.proxy_manager.device_id:
+                    headers['X-Device-ID'] = self.proxy_manager.device_id
+                    logger.debug(f"🔑 Added X-Device-ID: {self.proxy_manager.device_id}")
+                else:
+                    # КРИТИЧЕСКАЯ ОШИБКА: Без device_id запрос не должен отправляться
+                    logger.error(
+                        f"❌ CRITICAL: No device_id available - aborting request\n"
+                        f"   Path: {request.path}\n"
+                        f"   This should never happen - device_id must be generated on proxy start"
+                    )
+                    # Возвращаем 500 ошибку клиенту
+                    return web.Response(
+                        status=500,
+                        text="Internal error: Device ID not initialized. Please restart the application.",
+                        content_type="text/plain"
+                    )
+
                 # Формируем URL на backend с префиксом /api/v1/proxy
                 upstream_url = f"{backend_url.rstrip('/')}/api/v1/proxy{request.path_qs}"
                 logger.debug(f"🔐 Proxying to backend: {upstream_url}")
@@ -250,10 +268,11 @@ class ProxyManager:
         self.thread = None
         self.app_name = "Zenzefi Proxy"
 
-        # Security: tokens in memory only
+        # Security: tokens and device ID in memory only
         self.current_token = None    # Access token (RAM only)
         self.backend_url = None       # Backend URL (RAM only)
         self.token_expires_at = None  # Token expiration time (ISO 8601 string, RAM only)
+        self.device_id = None          # Device ID (hardware fingerprint, RAM only)
 
         # Error tracking
         self.last_error_type = None  # Тип последней ошибки: 'backend', 'token', 'port', 'unknown'
@@ -282,13 +301,30 @@ class ProxyManager:
             logger.error("❌ Backend URL is required")
             return False
 
+        # Generate Device ID (CRITICAL - before saving token)
+        try:
+            from core.device_id import generate_device_id
+            self.device_id = generate_device_id()
+        except Exception as e:
+            # СТРОГИЙ РЕЖИМ: Без device_id не запускаем proxy
+            self.last_error_type = "device_id_generation_failed"
+            self.last_error_details = str(e)
+            logger.error(
+                f"❌ Failed to generate Device ID - proxy start aborted\n"
+                f"   Error: {e}\n"
+                f"   Proxy will NOT start without valid Device ID"
+            )
+            return False
+
         # Сохраняем в память (НЕ на диск!)
         self.current_token = token
         self.backend_url = backend_url
 
-        logger.info(
-            f"🔐 Token configured (length: {len(token)} chars)\n"
-            f"🌐 Backend: {backend_url}"
+        logger.debug(
+            f"🔐 Security context prepared:\n"
+            f"   Token length: {len(token)} chars\n"
+            f"   Backend URL: {backend_url}\n"
+            f"   Device ID: {self.device_id}"
         )
 
         # Проверка порта
@@ -564,9 +600,10 @@ class ProxyManager:
             # ОЧИСТКА ДАННЫХ ИЗ ПАМЯТИ (критично для безопасности)
             self.current_token = None
             self.token_expires_at = None
+            self.device_id = None
             # backend_url НЕ очищаем - нужен для health monitoring
 
-            logger.info("🧹 Security cleanup: token and expiration time cleared from memory (backend_url preserved for health checks)")
+            logger.info("🧹 Security cleanup: token, device_id, and expiration cleared from memory (backend_url preserved for health checks)")
 
             # Логируем статистику
             if self.proxy:
