@@ -4,7 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Zenzefi Client is a Windows desktop application built with PySide6 that provides a local HTTPS proxy for connecting to the Zenzefi server. It acts as a man-in-the-middle proxy that rewrites URLs and handles both HTTP/HTTPS requests and WebSocket connections, allowing local development/testing against a remote server.
+Zenzefi Client is a Windows desktop application built with PySide6 that provides a local HTTPS proxy for connecting to the Zenzefi server via Backend Server. It forwards all requests to the Backend Server (127.0.0.1:8000), which handles authentication, validation, and proxying to Zenzefi Server.
+
+**Current Version:** v0.5.0-beta (Device Conflict Detection)
+
+**Key Features:**
+- **Header-based authentication:** X-Access-Token header (no cookies)
+- **Device conflict detection:** Hardware-based device ID (1 token = 1 device)
+- **Simplified proxy:** Forwards all requests to Backend (no content rewriting, caching, or WebSocket)
+- **SSL/TLS termination:** Self-signed certificate for local HTTPS (127.0.0.1:61000)
+- **Security:** Device ID and access token stored only in RAM, cleared on stop
 
 **Key Technology Stack:**
 - Python 3.13 (strict version requirement)
@@ -82,11 +91,11 @@ The core proxy functionality (`core/proxy_manager.py`) has two main classes:
    - `router()` - Simple router that forwards all requests through `handle_http()`
    - `get_full_stats()` - Returns basic statistics (requests, responses, errors, active connections)
 
-   **Cookie Forwarding:**
-   - Forwards browser cookies to backend
-   - Parses Set-Cookie headers from backend and re-sets them for local proxy domain (127.0.0.1:61000)
-   - Uses `secure=False` for localhost with self-signed certificate
-   - Sends `X-Local-Url` header to backend for proper content rewriting
+   **Header-Based Authentication:**
+   - Adds `X-Access-Token` header to all backend requests (from `ProxyManager.current_token`)
+   - Adds `X-Device-ID` header to all backend requests (hardware-based device fingerprint)
+   - Backend validates both headers before proxying to Zenzefi Server
+   - No cookie forwarding - authentication is header-based only
 
    **Connection Management:**
    - TCPConnector configured for backend (ssl=False, localhost HTTP)
@@ -100,6 +109,8 @@ The core proxy functionality (`core/proxy_manager.py`) has two main classes:
    - Port conflict detection and resolution (can terminate processes blocking port 61000)
    - SSL context setup using self-signed certificates (for client connections)
    - Thread-safe start/stop operations using `asyncio.run_coroutine_threadsafe()`
+   - **Device ID generation:** Hardware-based fingerprint on proxy start (blocks if fails)
+   - **Security:** Device ID and access token stored only in RAM, cleared on stop
    - **Graceful shutdown:** Properly cleans up session, connector, runner, and site resources
    - Logs basic statistics on shutdown
    - `get_proxy_stats()` - Retrieves real-time performance statistics
@@ -118,9 +129,44 @@ The core proxy functionality (`core/proxy_manager.py`) has two main classes:
 - Backend's caching logic - LRU cache for static resources
 - Desktop Client simply forwards requests/responses without modification
 
+### Device ID Generation
+
+**Version:** v0.5.0-beta (Added 2025-11-16)
+
+Desktop Client generates a **hardware-based device identifier** to support the "1 token = 1 device" policy enforced by Backend Server.
+
+**Implementation** (`core/device_id.py`):
+- **Function:** `generate_device_id()` - Generates 20-character SHA256 hash of hardware characteristics
+- **Hardware components used:**
+  - `platform.node()` - Computer name
+  - `platform.machine()` - Machine type (e.g., AMD64, x86_64)
+  - `platform.processor()` - Processor information
+  - `platform.system()` - OS name (Windows)
+- **Format:** First 20 characters of SHA256 hash (e.g., "a1b2c3d4e5f6g7h8i9j0")
+- **Stability:** Device ID remains the same across app restarts on the same PC
+- **Uniqueness:** Different computers generate different device IDs
+
+**Lifecycle:**
+1. **Generation:** Called in `ProxyManager.start()` before starting proxy server
+2. **Validation:** `validate_device_id()` checks format (length 8-255 characters)
+3. **Storage:** Stored ONLY in RAM (`ProxyManager.device_id`) - NEVER saved to disk
+4. **Usage:** Added as `X-Device-ID` header to all backend requests
+5. **Cleanup:** Cleared from memory in `ProxyManager.stop()` (security measure)
+
+**Error Handling:**
+- If generation fails → proxy startup aborted (strict security mode)
+- User sees error message in UI: "Failed to generate Device ID"
+- Logs error at DEBUG level with hardware information
+
+**Security:**
+- Device ID is NOT displayed in UI (only in DEBUG logs)
+- Device ID is NOT saved to configuration files
+- Device ID is cleared from memory when proxy stops
+- Device ID generation failure blocks proxy startup (no fallback)
+
 ### Authentication Architecture
 
-The application uses a **cookie-based authentication system** with integration to a backend server:
+The application uses a **header-based authentication system** with integration to a backend server:
 
 **Architecture Flow:**
 1. **Browser** → Desktop Client Proxy (https://127.0.0.1:61000)
@@ -136,71 +182,60 @@ The application uses a **cookie-based authentication system** with integration t
    - Token is cleared from memory when proxy stops (security measure)
    - Attempting to start proxy without token shows validation error
 
-2. **Authentication Flow:**
+2. **Device ID Requirement** (Desktop Client)
+   - Desktop client **generates device ID** on proxy start (hardware fingerprint)
+   - Device ID is stored **ONLY in RAM** (`ProxyManager.device_id`) - NEVER saved to disk
+   - Device ID generation failure → proxy startup aborted (strict security mode)
+   - Device ID is cleared from memory when proxy stops
+
+3. **Authentication Flow:**
    ```
    1. User enters access token in Desktop Client UI (QLineEdit widget)
    2. User clicks "Start Proxy"
    3. Desktop Client validates token is present
-   4. Desktop Client calls proxy_manager.start(backend_url, token)
-   5. Token saved to RAM (ProxyManager.current_token) - NOT to disk
-   6. Proxy starts on https://127.0.0.1:61000
-   7. Desktop Client authenticates with backend: POST /api/v1/proxy/authenticate
-   8. Backend validates token, returns cookie in response
+   4. Desktop Client generates device ID (hardware fingerprint)
+   5. If device ID generation fails → proxy startup aborted
+   6. Desktop Client calls proxy_manager.start(backend_url, token)
+   7. Token and device ID saved to RAM - NOT to disk
+   8. Proxy starts on https://127.0.0.1:61000
    9. User manually opens browser and navigates to: https://127.0.0.1:61000/
-   10. On first request, Desktop Client detects missing/outdated browser cookie
-   11. Desktop Client validates token with backend, gets max_age
-   12. Desktop Client sets cookie for browser (zenzefi_access_token, secure=False)
-   13. All subsequent requests use cookie authentication automatically
+   10. Desktop Client adds X-Access-Token and X-Device-ID headers to all backend requests
+   11. Backend validates both headers (token + device conflict detection)
+   12. Backend proxies request to Zenzefi Server
    ```
 
-3. **User-Agent Detection** (Client Type Detection):
-   - Desktop Client analyzes User-Agent header to distinguish browsers from applications
-   - **Browser clients** (Mozilla, Chrome, Safari, Firefox, Edge, Opera):
-     - Use cookie-based authentication automatically
-     - Desktop Client forwards cookies to backend
-   - **Application clients** (DTS, Monaco, diagnostic tools, curl, Python, etc.):
-     - Desktop Client adds `X-Access-Token` header from `ProxyManager.current_token`
-     - Ensures applications work without cookie support
-   - Implemented in `ZenzefiProxy._is_browser()` (proxy_manager.py:73-118)
+4. **Header-Based Authentication:**
+   - Desktop Client adds **two headers** to ALL backend requests:
+     - `X-Access-Token`: Access token from `ProxyManager.current_token`
+     - `X-Device-ID`: Device ID from `ProxyManager.device_id`
+   - Backend validates both headers before proxying to Zenzefi Server
+   - Missing X-Device-ID → 403 Forbidden (upgrade Desktop Client)
+   - Invalid token → 401 Unauthorized
+   - Token in use on different device → 409 Conflict (wait 5 minutes or stop other device)
+   - Implemented in `ZenzefiProxy._proxy_to_backend()` (proxy_manager.py)
 
-4. **Automatic Cookie Management** (Transparent to User):
-   - On GET requests to `/`, `/api/v1/proxy`, `/api/v1/proxy/`:
-     - Desktop Client checks if browser has `zenzefi_access_token` cookie
-     - If missing OR outdated (doesn't match current token in RAM):
-       - Desktop Client validates token with backend
-       - Gets cookie max_age from backend
-       - Sets/updates cookie for browser with 303 redirect
-       - Browser automatically receives updated cookie
-   - Implemented in `ZenzefiProxy._proxy_to_backend()` (proxy_manager.py:151-218)
-   - **Critical:** This happens automatically - user never sees token in URL
+5. **Device Conflict Detection:**
+   - Backend enforces "1 token = 1 device" policy
+   - Using token from different device → 409 Conflict error
+   - Session timeout: 5 minutes of inactivity (auto-cleanup every 2 minutes)
+   - Same device can reconnect after timeout (device_id matches)
+   - IP changes allowed (VPN, Wi-Fi switch) without conflict
 
-5. **Cookie Forwarding** (Desktop Client → Backend):
-   - Desktop Client reads cookies from browser request
-   - Forwards cookies to backend in request
-   - Backend returns Set-Cookie headers
-   - Desktop Client parses Set-Cookie and re-sets for local domain (127.0.0.1:61000)
-   - Uses `secure=False` for localhost with self-signed certificate
-
-6. **Auth Endpoints** (ALL handled by Backend):
-   - `/api/v1/proxy/authenticate` - Token → Cookie exchange
-   - `/api/v1/proxy/status` - Check authentication status
-   - `/api/v1/proxy/logout` - Clear authentication cookie
-   - Desktop Client simply forwards these requests to backend
-
-7. **Browser Usage:**
+6. **Browser Usage:**
    - User manually opens browser and navigates to `https://127.0.0.1:61000/`
-   - Desktop Client automatically sets cookie on first request (proxy_manager.py:151-218)
-   - Cookie authentication happens transparently without user seeing token
+   - Desktop Client automatically adds authentication headers to all requests
+   - Authentication is transparent - user never sees headers
    - User may see certificate warning - need to accept self-signed certificate
 
-8. **Logout and Cleanup:**
-   - When proxy stops, Desktop Client performs logout from backend
-   - DELETE request to `/api/v1/proxy/logout` with cookie
-   - Clears sensitive data from RAM: `current_token`, `backend_url`, `cookie_jar`
-   - Implemented in `ProxyManager.stop()` and `_logout_from_backend()` (proxy_manager.py:772-823)
-   - Security measure: ensures no tokens remain in memory after shutdown
+7. **Cleanup and Security:**
+   - When proxy stops, Desktop Client clears sensitive data from RAM:
+     - `current_token` - Access token
+     - `device_id` - Device identifier
+     - `backend_url` - Backend server URL
+   - Implemented in `ProxyManager.stop()` (proxy_manager.py)
+   - Security measure: ensures no tokens or device IDs remain in memory after shutdown
 
-**IMPORTANT:** The backend server must be running at `http://127.0.0.1:8000` for authentication to work. Start with: `poetry run uvicorn app.main:app --reload`
+**IMPORTANT:** The backend server must be running at `http://127.0.0.1:8000` for authentication to work. Start with: `python run_dev.py`
 
 ### Threading Model
 
